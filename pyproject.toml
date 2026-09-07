@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "partest-atlas"
+version = "0.1.0"
+description = "Сбор наблюдений о системе и о прогоне тестов в версионированные артефакты — агент карты «Веха»"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "dec01" }]
+keywords = ["testing", "coverage", "observability", "pytest", "openapi"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: Pytest",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Software Development :: Testing",
+]
+
+dependencies = [
+    "partest>=1.8",
+    "PyYAML>=6.0.2",
+]
+
+[project.optional-dependencies]
+# Драйверы вынесены в extras намеренно: их лицензии и их вес не должны навязываться
+# проекту, которому нужен только сбор контракта или разбор спецификаций.
+# psycopg распространяется под LGPL — держим отдельно и заменяемым.
+postgres = ["psycopg[binary]>=3.2.0"]
+kafka = ["kafka-python>=2.0.2"]
+ui = ["playwright>=1.40.0"]
+specs = []
+all = ["partest-atlas[postgres,kafka,ui]"]
+
+# Имя команды намеренно длинное: короткое `atlas` уже занято в экосистеме
+# (MongoDB Atlas CLI), а конфликт имён в закрытом контуре ловится дорого.
+[project.scripts]
+partest-atlas = "partest_atlas.cli:main"
+
+# Плагины подключаются автоматически и молчат, пока не выставлена своя переменная
+# окружения: обычный прогон не платит за их присутствие ничего.
+# Маркера требований здесь нет — он живёт в partest, потому что полезен и без карты.
+[project.entry-points.pytest11]
+partest_atlas_ui_flow = "partest_atlas.plugins.ui_flow"
+partest_atlas_db_effects = "partest_atlas.plugins.db_effects"
+partest_atlas_bus_flow = "partest_atlas.plugins.bus_flow"
+
+[tool.setuptools.packages.find]
+include = ["partest_atlas*"]
