@@ -44,6 +44,7 @@ partest-atlas = "partest_atlas.cli:main"
 # стороны держит `tests/test_packaging.py`.
 [project.entry-points.pytest11]
 partest_atlas_db_effects = "partest_atlas.plugins.db_effects"
+partest_atlas_bus_flow = "partest_atlas.plugins.bus_flow"
 
 # Остальных точек входа `pytest11` здесь пока НЕТ, и это осознанно.
 #
