@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import importlib
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -126,6 +127,40 @@ def scan_text(
             hits.setdefault("topic", Counter())[topic] += count
 
     return {kind: dict(sorted(counter.items())) for kind, counter in sorted(hits.items()) if counter}
+
+
+class SourceNotConfigured(RuntimeError):
+    """Источник журналов не описан либо описан неверно."""
+
+
+def open_source(section: Mapping[str, Any]):
+    """Источник журналов так, как назвал его проект. ``None``, если не назвал.
+
+    ``source: "модуль:функция"`` — функция, отдающая пары «имя контейнера → текст
+    журнала». Откуда она их берёт, пакету знать не положено и не нужно: у одного проекта
+    это панель управления контейнерами, у другого `docker logs`, у третьего файл или
+    журнал системы. Сборщику нужен **текст**, а не инструмент.
+
+    Зашить сюда конкретный инструмент значило бы, что второй проект требует правки
+    пакета. Ровно та протечка, из-за которой соединение с базой и читатель шины тоже
+    приходят из конфигурации.
+    """
+    target = section.get("source")
+    if not target:
+        return None
+    module_name, _, attr = str(target).partition(":")
+    if not attr:
+        raise SourceNotConfigured(f"container_logs.source={target!r}: ожидалось 'модуль:функция'")
+    try:
+        module = importlib.import_module(module_name)
+    except Exception as exc:
+        raise SourceNotConfigured(
+            f"container_logs.source={target!r} не импортируется: {exc}"
+        ) from exc
+    factory = getattr(module, attr, None)
+    if factory is None:
+        raise SourceNotConfigured(f"container_logs.source={target!r}: в {module_name} нет {attr!r}")
+    return factory
 
 
 def known_values(schema_doc: Mapping[str, Any], bus_doc: Mapping[str, Any]) -> Dict[str, Set[str]]:

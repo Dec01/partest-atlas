@@ -151,3 +151,39 @@ def test_the_artifact_it_writes_validates_clean(tmp_path):
 def test_the_kind_is_one_the_contract_knows():
     assert cl.KIND in artifacts.KINDS
     assert artifacts.filename(cl.KIND) == "container_logs.json"
+
+
+# --- источник журналов называет проект -------------------------------------
+
+
+def test_no_source_configured_is_not_an_error():
+    """Проект журналы не описал — законное состояние."""
+    assert cl.open_source({}) is None
+
+
+def test_a_malformed_source_is_refused_by_name():
+    with pytest.raises(cl.SourceNotConfigured, match="модуль:функция"):
+        cl.open_source({"source": "простоимя"})
+
+
+def test_an_unimportable_source_says_so():
+    with pytest.raises(cl.SourceNotConfigured, match="не импортируется"):
+        cl.open_source({"source": "нет_модуля:журналы"})
+
+
+def test_the_project_source_named_in_config_is_used(monkeypatch):
+    """Сборщику нужен текст, а не инструмент: у одного проекта панель управления
+    контейнерами, у другого `docker logs`, у третьего файл."""
+    import sys
+    import types
+
+    m = types.ModuleType("журналы_проекта")
+    m.достать = lambda: {"контейнер": "referenced from table \"task\""}
+    monkeypatch.setitem(sys.modules, "журналы_проекта", m)
+
+    источник = cl.open_source({"source": "журналы_проекта:достать"})
+    найдено = {
+        имя: scan_text(текст, [ТАБЛИЦА], {"table": {"task"}})
+        for имя, текст in источник().items()
+    }
+    assert найдено == {"контейнер": {"table": {"task": 1}}}
