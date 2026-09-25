@@ -142,6 +142,70 @@ def write(
     )
 
 
+def validate(doc: Dict[str, Any]) -> List[str]:
+    """Проверить документ артефакта на соответствие контракту. Пустой список — сходится.
+
+    Зачем это здесь, а не у потребителя. Формат читает **чужая программа**, и она не
+    обязана повторять правила: повторённое правило расходится молча, и расхождение
+    обнаруживается не там, где допущено. Один источник — здесь.
+
+    Отдельно от :func:`read`, который снисходителен нарочно: карта должна подниматься на
+    проекте, где ещё ничего не собрано, поэтому битый файл он отдаёт пустым словарём.
+    Снисходительность чтения и строгость проверки — разные задачи, и смешивать их нельзя:
+    первая держит карту на ногах, вторая ловит того, кто пишет артефакты мимо контракта.
+
+    Возвращает список человекочитаемых расхождений, ничего не поднимает и не печатает:
+    во что обходится расхождение, решает вызывающий.
+    """
+    problems: List[str] = []
+
+    if not isinstance(doc, dict):
+        return [f"ожидался объект, получено {type(doc).__name__}"]
+    if not doc:
+        return ["документ пуст: файла нет, он нечитаем или записан не нами"]
+
+    version = doc.get("version")
+    if "version" not in doc:
+        problems.append("нет ключа 'version'")
+    elif not isinstance(version, int) or isinstance(version, bool):
+        problems.append(f"version: ожидалось целое, получено {version!r}")
+    elif version > SCHEMA_VERSION:
+        problems.append(
+            f"version={version} новее известной схемы {SCHEMA_VERSION}: "
+            "артефакт писал кто-то новее нас, читать его вслепую нельзя"
+        )
+
+    kind = doc.get("kind")
+    if "kind" not in doc:
+        problems.append("нет ключа 'kind'")
+    elif kind not in KINDS:
+        problems.append(f"kind={kind!r} — не из набора {sorted(KINDS)}")
+
+    scope = doc.get("scope")
+    if "scope" not in doc:
+        problems.append("нет ключа 'scope'")
+    elif not isinstance(scope, dict):
+        problems.append(f"scope: ожидался объект, получено {type(scope).__name__}")
+    else:
+        for field in ("system", "env"):
+            if not isinstance(scope.get(field), str) or not scope.get(field):
+                problems.append(f"scope.{field}: ожидалась непустая строка, получено {scope.get(field)!r}")
+
+    if "collected_at" not in doc:
+        problems.append("нет ключа 'collected_at'")
+    elif not isinstance(doc["collected_at"], str) or not doc["collected_at"]:
+        problems.append(f"collected_at: ожидалась непустая строка, получено {doc['collected_at']!r}")
+
+    # `collector` может быть пустой строкой — сборщик не обязан называться. Но ключ
+    # обязан быть: его отсутствие и пустое имя отвечают на разные вопросы.
+    if "collector" not in doc:
+        problems.append("нет ключа 'collector'")
+    elif not isinstance(doc["collector"], str):
+        problems.append(f"collector: ожидалась строка, получено {type(doc['collector']).__name__}")
+
+    return problems
+
+
 def append_records(
     path: Path,
     kind: str,
