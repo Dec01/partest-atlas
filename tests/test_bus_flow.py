@@ -179,3 +179,40 @@ def test_the_artifact_it_writes_validates_clean(tmp_path):
 def test_the_kind_is_one_the_contract_knows():
     assert bus_flow.KIND in artifacts.KINDS
     assert artifacts.filename(bus_flow.KIND) == "bus_flow.json"
+
+
+# --- вывод про потребителя -------------------------------------------------
+
+
+def test_without_the_clock_the_record_stays_as_it_was():
+    """Не было записей — нет и вывода. Пустой `afterWrite` читался бы как «нет», то
+    есть как утверждение, которого мы не делали."""
+    row = diff_offsets({"т": {0: 0}}, {"т": {0: 1}})
+    assert "afterWrite" not in row[0]
+    assert "http" not in row[0]
+
+
+def test_an_event_after_the_last_write_points_at_the_consumer():
+    """Тест больше не просил ничего записать — значит писал не API."""
+    row = diff_offsets({"т": {0: 0}}, {"т": {0: 1}}, last_write=1.0, counters={"requests": 3, "writes": 1})[0]
+    assert row["afterWrite"] is True
+    assert row["http"] == {"requests": 3, "writes": 1}
+
+
+def test_counters_travel_with_the_inference():
+    """Признак не доказательство: на общем стенде писать могла чужая сессия, и по
+    числу запросов видно, насколько выводу можно верить."""
+    row = diff_offsets({"т": {0: 0}}, {"т": {0: 1}}, counters={"requests": 0, "writes": 0})[0]
+    assert row["afterWrite"] is False
+    assert row["http"] == {"requests": 0, "writes": 0}
+
+
+def test_the_clock_is_read_before_the_settle(monkeypatch):
+    """После сна «последняя запись» окажется в прошлом на величину сна у любого
+    прогона, и признак выродился бы в «всегда да»."""
+    порядок = []
+    monkeypatch.setattr(bus_flow.http_clock, "last_write", lambda: порядок.append("часы") or 1.0)
+    monkeypatch.setattr(bus_flow.time, "sleep", lambda s: порядок.append("сон"))
+    r = ПоддельныйЧитатель([{"т": {0: 0}}, {"т": {0: 1}}])
+    bus_flow.open_flow(r, ["т"], settle_sec=1.0).finish()
+    assert порядок == ["часы", "сон"]

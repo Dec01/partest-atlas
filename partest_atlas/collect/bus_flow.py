@@ -11,10 +11,10 @@
 Как и у соседей, **вычисление отделено от опроса**: :func:`diff_offsets` — чистая
 функция над двумя снимками смещений.
 
-Чего здесь намеренно нет: вывода «событие пришло после последней записи теста». Он
-опирается на часы HTTP-запросов — отдельный сборщик, который ещё не перенесён. Пока он
-не приехал, признак принимается параметром, а не вычисляется тут: перенос по частям
-должен оставаться проверяемым на каждом шаге.
+Вывод «писал не API, а потребитель» строится рядом, по часам HTTP-запросов
+(`collect.http_clock`): если событие прошло **позже** последнего пишущего запроса, сам
+API попросить о записи уже не мог. Признак не доказательство — стенд бывает общий, —
+поэтому рядом с ним всегда лежат счётчики запросов, по которым видно, чему верить.
 """
 
 from __future__ import annotations
@@ -22,6 +22,8 @@ from __future__ import annotations
 import importlib
 import time
 from dataclasses import dataclass, field
+
+from partest_atlas.collect import http_clock
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 KIND = "bus.flow"
@@ -52,6 +54,8 @@ def diff_offsets(
     test: str = "",
     nodeid: str = "",
     scope: str = SESSION,
+    last_write: float = 0.0,
+    counters: Optional[Mapping[str, int]] = None,
 ) -> List[Dict[str, Any]]:
     """Сколько событий прошло по каждому топику. Топики без событий не попадают в вывод.
 
@@ -74,15 +78,21 @@ def diff_offsets(
         events += sum(int(v) for part, v in now.items() if part not in was)
         if not events:
             continue
-        out.append(
-            {
-                "test": test,
-                "nodeid": nodeid,
-                "topic": topic,
-                "events": events,
-                "scope": scope,
-            }
-        )
+        record: Dict[str, Any] = {
+            "test": test,
+            "nodeid": nodeid,
+            "topic": topic,
+            "events": events,
+            "scope": scope,
+        }
+        if last_write or counters:
+            # `afterWrite` — признак работы потребителя: тест больше не просил ничего
+            # записать. Счётчики рядом, потому что признак не доказательство: на общем
+            # стенде писать могла чужая сессия, и по числу запросов видно, насколько
+            # выводу можно верить.
+            record["afterWrite"] = bool(last_write) and time.time() > last_write
+            record["http"] = dict(counters or {})
+        out.append(record)
     return out
 
 
@@ -152,10 +162,17 @@ class BusFlow:
         return self
 
     def finish(self, *, test: str = "", nodeid: str = "") -> List[Dict[str, Any]]:
+        # Момент берётся **до** выдержки: после сна «последняя запись» окажется в
+        # прошлом на величину сна у любого прогона, и признак выродится в «всегда да».
+        last_write = http_clock.last_write()
+        counters = http_clock.counters()
         if self.settle_sec:
             time.sleep(self.settle_sec)
         after = {t: dict(self.reader.end_offsets(t)) for t in self._before}
-        return diff_offsets(self._before, after, test=test, nodeid=nodeid, scope=self.scope)
+        return diff_offsets(
+            self._before, after, test=test, nodeid=nodeid, scope=self.scope,
+            last_write=last_write, counters=counters,
+        )
 
 
 def open_flow(
