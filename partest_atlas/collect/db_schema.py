@@ -17,12 +17,11 @@
 
 from __future__ import annotations
 
-import importlib
-from contextlib import contextmanager
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from partest_atlas import artifacts
-from partest_atlas.config import Config, env, load
+from partest_atlas.adapters.postgres import connect
+from partest_atlas.config import Config, load
 
 KIND = "db.schema"
 
@@ -159,57 +158,13 @@ def build(
     }
 
 
-@contextmanager
-def _connect(section: Mapping[str, Any]) -> Iterator[Any]:
-    """Соединение так, как назвал проект.
-
-    Два пути, в порядке предпочтения:
-
-    ``connect: "модуль:функция"`` — у проекта своя функция-контекстменеджер. Она знает
-    про туннели, про права и про всё прочее, чего пакету знать не положено.
-
-    ``dsn_env: ИМЯ`` — строка подключения в переменной окружения; поднимаем psycopg сами.
-    """
-    target = section.get("connect")
-    if target:
-        module_name, _, attr = str(target).partition(":")
-        if not attr:
-            raise RuntimeError(
-                f"database.connect={target!r}: ожидалось 'модуль:функция'"
-            )
-        try:
-            factory = getattr(importlib.import_module(module_name), attr)
-        except Exception as exc:
-            raise RuntimeError(
-                f"database.connect={target!r} не импортируется: {exc}"
-            ) from exc
-        with factory() as conn:
-            yield conn
-        return
-
-    dsn_env = section.get("dsn_env") or "DATABASE_URL"
-    dsn = env(str(dsn_env))
-    if not dsn:
-        raise RuntimeError(
-            f"database.connect не задан и переменная {dsn_env} пуста — опрашивать нечего"
-        )
-    import psycopg  # noqa: PLC0415 — драйвер в extras, не у всех установлен
-    from psycopg.rows import dict_row  # noqa: PLC0415
-
-    conn = psycopg.connect(dsn, row_factory=dict_row)
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-
 def collect(config: Optional[Config] = None, *, count_rows: bool = True) -> Dict[str, Any]:
     """Опросить базу и слепить содержание артефакта."""
     cfg = config or load()
     section = cfg.section("database")
     schemas: List[str] = list(section.get("schemas") or ["public"])
 
-    with _connect(section) as conn:
+    with connect(section) as conn:
         with conn.cursor() as cur:
             cur.execute(COLUMNS_SQL, {"schemas": schemas})
             columns = cur.fetchall()

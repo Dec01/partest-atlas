@@ -158,38 +158,3 @@ def test_the_artifact_it_writes_validates_clean(tmp_path, rows, monkeypatch):
 def test_the_kind_is_one_the_contract_knows():
     assert db_schema.KIND in artifacts.KINDS
     assert artifacts.filename(db_schema.KIND) == "db_schema.json"
-
-
-# --- соединение приходит из конфигурации, а не из кода ---------------------
-
-
-def test_connect_refuses_a_malformed_target():
-    with pytest.raises(RuntimeError, match="модуль:функция"):
-        with db_schema._connect({"connect": "простоимя"}):
-            pass
-
-
-def test_connect_says_which_variable_was_empty(monkeypatch):
-    monkeypatch.delenv("ПРОБНАЯ_СТРОКА", raising=False)
-    with pytest.raises(RuntimeError, match="ПРОБНАЯ_СТРОКА"):
-        with db_schema._connect({"dsn_env": "ПРОБНАЯ_СТРОКА"}):
-            pass
-
-
-def test_connect_uses_the_project_callable_named_in_config(monkeypatch):
-    """Ради чего перенос и делался: путь к функции проекта — в конфигурации, не в коде."""
-    import contextlib
-    import sys
-    import types
-
-    module = types.ModuleType("проектный_модуль")
-
-    @contextlib.contextmanager
-    def соединение():
-        yield "соединение проекта"
-
-    module.соединение = соединение
-    monkeypatch.setitem(sys.modules, "проектный_модуль", module)
-
-    with db_schema._connect({"connect": "проектный_модуль:соединение"}) as conn:
-        assert conn == "соединение проекта"
