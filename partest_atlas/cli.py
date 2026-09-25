@@ -112,6 +112,21 @@ def _cmd_show(paths: Sequence[str], *, as_json: bool) -> int:
     return 0
 
 
+def _cmd_wrap(command: Sequence[str]) -> int:
+    """Выполнить команду и вернуть **её** код.
+
+    Обёртка, подменяющая код команды, превращает провал прогона в успех у всех, кто на
+    неё смотрит: у человека, у конвейера, у следующего шага сборки. Наблюдатель не имеет
+    права менять исход того, за чем наблюдает.
+    """
+    from partest_atlas import wrap
+
+    result = wrap.run(list(command))
+    for note in result.notes:
+        print(f"[atlas] wrap: {note}", file=sys.stderr)
+    return result.code
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="partest-atlas",
@@ -126,10 +141,20 @@ def main(argv: Iterable[str] | None = None) -> int:
     p_show = sub.add_parser("show", help="показать шапку артефакта и размеры записей")
     p_show.add_argument("paths", nargs="+", help="файлы артефактов или каталоги с ними")
 
+    p_wrap = sub.add_parser(
+        "wrap",
+        help="выполнить чужую команду и снять наблюдения вокруг неё",
+        description="Код возврата отдаётся команды, а не обёртки.",
+    )
+    p_wrap.add_argument("rest", nargs=argparse.REMAINDER, help="-- и сама команда")
+
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if args.command == "check":
         return _cmd_check(args.paths, as_json=args.json)
+    if args.command == "wrap":
+        # Ведущий `--` argparse оставляет в остатке; команде он не нужен.
+        return _cmd_wrap([a for a in args.rest if a != "--"])
     return _cmd_show(args.paths, as_json=args.json)
 
 
