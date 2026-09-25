@@ -5,9 +5,9 @@
 документ на требования и вешает на каждое якоря — пути API, таблицы, экраны, — по
 которым карта связывает требование с узлами и с тестами.
 
-Здесь — ядро, где вся тонкость: нарезка по заголовкам и якоря. Чтение самого файла —
-тонкий слой сверху: форматов документов много, и разбор конкретного не должен решать,
-как устроено требование.
+Ядро — нарезка по заголовкам и якоря; чтение файла отделено от него намеренно. Форматов
+документов много, и разбор одного из них не должен решать, как устроено требование:
+:func:`read_docx` отдаёт блоки, а что с ними делать, знает :func:`slice_requirements`.
 
 Ничего проектного: стили заголовков, префикс API и словарь синонимов приходят из
 `atlas.yaml`.
@@ -68,6 +68,80 @@ class Requirement:
             "children": self.children,
             "anchors": dict(self.anchors),
         }
+
+
+#: Пространство имён Word в `word/document.xml`.
+_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+def _para_text(node: Any) -> str:
+    """Текст абзаца с учётом разрывов строк и табуляций внутри него."""
+    parts: List[str] = []
+    for el in node.iter():
+        if el.tag == f"{_W}t":
+            parts.append(el.text or "")
+        elif el.tag in (f"{_W}br", f"{_W}cr"):
+            parts.append("\n")
+        elif el.tag == f"{_W}tab":
+            parts.append(" ")
+    return "".join(parts).strip()
+
+
+def _para_style(node: Any) -> str:
+    props = node.find(f"{_W}pPr")
+    if props is None:
+        return ""
+    style = props.find(f"{_W}pStyle")
+    return (style.get(f"{_W}val") or "") if style is not None else ""
+
+
+def _table_text(table: Any) -> str:
+    """Таблица разворачивается в строки «ячейка | ячейка».
+
+    В спецификациях таблицы несут атрибуты сущностей и описания полей — самое ценное для
+    якорей. Разметка теряется сознательно: нужен текст для поиска, а не вёрстка.
+    """
+    rows: List[str] = []
+    for tr in table.findall(f"{_W}tr"):
+        cells = [_WS_RE.sub(" ", _para_text(tc)).strip() for tc in tr.findall(f"{_W}tc")]
+        line = " | ".join(c for c in cells if c)
+        if line:
+            rows.append(line)
+    return "\n".join(rows)
+
+
+def read_docx(path: Any) -> List[Block]:
+    """Документ → плоский список блоков в порядке чтения.
+
+    Идём по **прямым детям** `body`, а не по всему дереву: абзацы внутри таблиц иначе
+    попали бы в поток дважды и разорвали бы разделы — заголовок оказался бы отделён от
+    своего текста куском, который уже прочитан.
+
+    Читается штатной библиотекой: `.docx` — это zip с `word/document.xml`, и ради одного
+    формата тянуть зависимость в публичный пакет незачем.
+    """
+    import xml.etree.ElementTree as ET  # noqa: PLC0415
+    import zipfile  # noqa: PLC0415
+
+    with zipfile.ZipFile(path) as archive:
+        xml = archive.read("word/document.xml")
+    body = ET.fromstring(xml).find(f"{_W}body")
+    if body is None:
+        return []
+
+    out: List[Block] = []
+    for node in list(body):
+        if node.tag == f"{_W}p":
+            text = _para_text(node)
+            if text:
+                style = _para_style(node)
+                kind = "code" if style.lower().startswith("sourcecode") else "para"
+                out.append(Block(text=text, style=style, kind=kind))
+        elif node.tag == f"{_W}tbl":
+            text = _table_text(node)
+            if text:
+                out.append(Block(text=text, kind="table"))
+    return out
 
 
 def _slug(title: str) -> str:
