@@ -25,7 +25,6 @@ allow_version_literals: true
 |---|---|
 | [[components/artifacts]] | `partest_atlas/artifacts.py` |
 | [[components/overview]] | `README.md`, `pyproject.toml`, `partest_atlas/__init__.py` |
-| [[decisions/agent-and-server]] | `README.md`, раздел «Зачем разделено так» |
 | [[concepts/evidence]] | `AGENTS.md`, красная линия 7 — черновик, кода ещё нет |
 | [[status]] | `CHANGELOG.md` плюс сверка с рабочим деревом |
 
