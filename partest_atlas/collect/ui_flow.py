@@ -149,3 +149,102 @@ def build(links: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
             "direct": sum(1 for r in rows if r["confidence"] == "direct"),
         },
     }
+
+
+#: Слушатель, инжектируемый в страницу. Ставится на фазе capture и через
+#: `add_init_script`, поэтому переживает переходы и перезагрузки: иначе после первого же
+#: перехода записывать было бы нечего, а выглядело бы это как «пользователь ничего не
+#: делал».
+RECORDER_JS = r"""
+(() => {
+  if (window.__atlasFlow) return;
+  const buf = [];
+  window.__atlasFlow = { take() { const out = buf.slice(); buf.length = 0; return out; } };
+  const label = (el) => {
+    if (!el || !el.closest) return null;
+    const host = el.closest('[data-testid],button,a,[role="button"],[role="tab"],'
+      + 'input,select,textarea,label');
+    if (!host) return null;
+    const text = (host.innerText || host.value || host.getAttribute('aria-label') || '')
+      .trim().replace(/\s+/g, ' ').slice(0, 60);
+    return {
+      control: host.getAttribute('data-testid') || null,
+      role: host.getAttribute('role') || host.tagName.toLowerCase(),
+      text: text || null,
+    };
+  };
+  const push = (type, el) => {
+    const t = label(el);
+    if (!t) return;
+    buf.push({ type, ts: Date.now(), screen: location.hash || location.pathname, ...t });
+  };
+  document.addEventListener('click', (e) => push('click', e.target), true);
+  document.addEventListener('change', (e) => push('change', e.target), true);
+  document.addEventListener('submit', (e) => push('submit', e.target), true);
+})();
+"""
+
+
+class Recorder:
+    """Пишет действия и запросы одной страницы. Тонкий слой: правила связывания — выше.
+
+    Ни одна ошибка страницы не должна ронять прогон: сбор карты не то, ради чего проект
+    гоняет UI-тесты. Поэтому обращения к странице обёрнуты, а неудача означает «действий
+    не забрали», а не «тест упал».
+    """
+
+    def __init__(self, *, window_ms: int = DEFAULT_WINDOW_MS,
+                 ignore_url: Sequence[str] = (), ignore_control: Sequence[str] = ()) -> None:
+        self.window_ms = window_ms
+        self.ignore_url = list(ignore_url)
+        self.ignore_control = list(ignore_control)
+        self.actions: List[Dict[str, Any]] = []
+        self.calls: List[Dict[str, Any]] = []
+
+    def attach(self, page: Any) -> "Recorder":
+        page.add_init_script(RECORDER_JS)
+        try:
+            # Страница уже открыта — доинжектим вручную, иначе слушатель появится
+            # только после следующего перехода.
+            page.evaluate(RECORDER_JS)
+        except Exception:
+            pass
+        page.on("response", self._on_response)
+        return self
+
+    def _on_response(self, response: Any) -> None:
+        import time as _time
+
+        try:
+            request = response.request
+            self.calls.append(
+                {
+                    "ts": _time.time() * 1000,
+                    "url": request.url,
+                    "method": request.method,
+                    "status": response.status,
+                }
+            )
+        except Exception:
+            pass
+
+    def pull_actions(self, page: Any) -> None:
+        try:
+            found = page.evaluate("window.__atlasFlow && window.__atlasFlow.take()")
+        except Exception:
+            return
+        for action in found or []:
+            self.actions.append(action)
+
+    def drain(self, page: Any) -> List[Dict[str, Any]]:
+        """Собрать связи и очистить буферы."""
+        self.pull_actions(page)
+        links = attribute(
+            self.actions, self.calls,
+            window_ms=self.window_ms,
+            ignore_url=self.ignore_url,
+            ignore_control=self.ignore_control,
+        )
+        self.actions.clear()
+        self.calls.clear()
+        return links

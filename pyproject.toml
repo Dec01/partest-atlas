@@ -45,8 +45,10 @@ partest-atlas = "partest_atlas.cli:main"
 [project.entry-points.pytest11]
 partest_atlas_db_effects = "partest_atlas.plugins.db_effects"
 partest_atlas_bus_flow = "partest_atlas.plugins.bus_flow"
+partest_atlas_ui_flow = "partest_atlas.plugins.ui_flow"
 
-# Остальных точек входа `pytest11` здесь пока НЕТ, и это осознанно.
+# Все три точки входа объявлены — и каждая появилась вместе со своим модулем.
+# История, из-за которой это правило записано:
 #
 # Они были объявлены до того, как появились модули плагинов, и цена оказалась
 # несоразмерной: pytest грузит `pytest11` на старте, **до сбора тестов**, поэтому
