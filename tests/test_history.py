@@ -100,6 +100,25 @@ def test_a_missing_key_is_omitted_not_nulled():
     assert history.coverage_snapshot({"summary": {"avg": 1.0}}) == {"avg": 1.0}
 
 
+def test_the_snapshot_does_not_change_with_the_optin_selection_key():
+    """`meta.selection.optin` из partest 2.5.0 — ключ аддитивный. Срез берёт только
+    сводку, и отчёт с этим ключом даёт тот же срез, что и без него."""
+    summary = {"avg": 50.0, "full": 1, "partial": 1, "empty": 0, "endpoints": 2}
+    old = {"meta": {"selection": {}}, "summary": dict(summary)}
+    new = {
+        "meta": {
+            "selection": {
+                "optin": {
+                    "slow": {"state": "env", "env": "RUN_SLOW", "deselected": 0},
+                    "manual": {"state": "off", "env": None, "deselected": 3},
+                }
+            }
+        },
+        "summary": dict(summary),
+    }
+    assert history.coverage_snapshot(new) == history.coverage_snapshot(old) == summary
+
+
 def test_no_report_is_an_empty_snapshot():
     assert history.coverage_snapshot(None) == {}
     assert history.coverage_snapshot({}) == {}

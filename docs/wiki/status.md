@@ -1,7 +1,7 @@
 ---
 title: Статус partest-atlas
 status: current
-verified: 2026-09-25
+verified: 2026-10-09
 sources: [partest_atlas/__init__.py, CHANGELOG.md]
 audience: agent
 allow_version_literals: true
@@ -36,7 +36,7 @@ allow_version_literals: true
 - `partest_atlas/cli.py` — команда `partest-atlas`: `show`, `check` и `wrap`.
 - `wrap.py` — снимки вокруг чужого прогона, который не наш pytest; код возврата
   отдаётся команды, а не обёртки.
-- `tests/` — 299 проверок: контракт, атомарность, упаковка, девять сборщиков, три
+- `tests/` — 300 проверок: контракт, атомарность, упаковка, девять сборщиков, три
   плагина, обёртка.
 - `config.py` — чтение `atlas.yaml`; `adapters/postgres.py` — соединение, названное
   проектом, а не выбранное пакетом.
