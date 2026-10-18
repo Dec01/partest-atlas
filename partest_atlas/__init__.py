@@ -9,6 +9,6 @@
 
 from partest_atlas.artifacts import KINDS, SCHEMA_VERSION, Scope
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = ["KINDS", "SCHEMA_VERSION", "Scope", "__version__"]

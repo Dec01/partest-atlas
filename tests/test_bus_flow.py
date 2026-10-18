@@ -192,8 +192,9 @@ def test_without_the_clock_the_record_stays_as_it_was():
     assert "http" not in row[0]
 
 
-def test_an_event_after_the_last_write_points_at_the_consumer():
-    """Тест больше не просил ничего записать — значит писал не API."""
+def test_after_write_is_true_once_the_clock_has_seen_any_write():
+    """Фактический смысл поля: часы видели хоть одну пишущую запись с `install()` или
+    последнего `reset()`. Времени события здесь нет, и о потребителе поле не говорит."""
     row = diff_offsets({"т": {0: 0}}, {"т": {0: 1}}, last_write=1.0, counters={"requests": 3, "writes": 1})[0]
     assert row["afterWrite"] is True
     assert row["http"] == {"requests": 3, "writes": 1}
@@ -208,8 +209,7 @@ def test_counters_travel_with_the_inference():
 
 
 def test_the_clock_is_read_before_the_settle(monkeypatch):
-    """После сна «последняя запись» окажется в прошлом на величину сна у любого
-    прогона, и признак выродился бы в «всегда да»."""
+    """Запросы, пришедшие во время выдержки, к окну уже не относятся."""
     порядок = []
     monkeypatch.setattr(bus_flow.http_clock, "last_write", lambda: порядок.append("часы") or 1.0)
     monkeypatch.setattr(bus_flow.time, "sleep", lambda s: порядок.append("сон"))

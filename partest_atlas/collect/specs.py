@@ -110,6 +110,47 @@ def _table_text(table: Any) -> str:
     return "\n".join(rows)
 
 
+#: Потолок распакованного `word/document.xml`. Текст спецификации в сотни страниц —
+#: единицы мегабайт. Ограничены байты, а память на дерево ElementTree в худшем случае —
+#: около 45 байт на байт XML: на потолке это около 0,6–0,75 ГБ. Больше — не
+#: спецификация, а zip-бомба.
+MAX_DOCUMENT_XML_BYTES = 16 * 1024 * 1024
+
+
+class UnsafeDocument(ValueError):
+    """`.docx` не разбираем: в `word/document.xml` есть DTD (Word его не пишет, а через
+    него идут атаки на XML) или он больше :data:`MAX_DOCUMENT_XML_BYTES`."""
+
+
+def _refuse_dtd(xml: bytes) -> None:
+    """Отказать документу с DTD до того, как его разберёт ElementTree.
+
+    Обе классические атаки на XML живут в DTD: внешние сущности (чтение файлов, запросы
+    наружу) и «миллиард смешков» (экспоненциальное раскрытие внутренних сущностей).
+    Штатный expat внешние сущности не загружает, а от раскрытия защищён только с версии
+    2.4 — какая expat под интерпретатором потребителя, пакет не выбирает. Word в
+    `document.xml` DTD не пишет никогда, поэтому проще и надёжнее не разбирать DTD вовсе:
+    предварительный проход голым expat останавливается на первом же объявлении, раньше
+    любой подстановки. Так же устроен `defusedxml` (`forbid_dtd`), но без новой
+    зависимости в открытом пакете.
+    """
+    from xml.parsers import expat  # noqa: PLC0415
+
+    def refuse(*_: Any) -> None:
+        raise UnsafeDocument("word/document.xml содержит DTD — такой .docx не разбираем")
+
+    parser = expat.ParserCreate()
+    parser.StartDoctypeDeclHandler = refuse
+    parser.EntityDeclHandler = refuse
+    parser.ExternalEntityRefHandler = refuse
+    try:
+        parser.Parse(xml, True)
+    except expat.ExpatError:
+        # Синтаксис проверяет ElementTree: битый XML падает `ET.ParseError`. DTD до места
+        # ошибки к этому моменту уже отклонён.
+        pass
+
+
 def read_docx(path: Any) -> List[Block]:
     """Документ → плоский список блоков в порядке чтения.
 
@@ -123,9 +164,26 @@ def read_docx(path: Any) -> List[Block]:
     import xml.etree.ElementTree as ET  # noqa: PLC0415
     import zipfile  # noqa: PLC0415
 
+    name = "word/document.xml"
     with zipfile.ZipFile(path) as archive:
-        xml = archive.read("word/document.xml")
-    body = ET.fromstring(xml).find(f"{_W}body")
+        # Объявленный размер проверяется до распаковки, а читается не больше потолка:
+        # заголовок архива может и соврать.
+        try:
+            declared = archive.getinfo(name).file_size
+        except KeyError:
+            raise ValueError(f"{path}: в архиве нет {name} — это не документ Word") from None
+        if declared > MAX_DOCUMENT_XML_BYTES:
+            raise UnsafeDocument(
+                f"{name}: {declared} байт после распаковки, потолок {MAX_DOCUMENT_XML_BYTES}"
+            )
+        with archive.open(name) as member:
+            xml = member.read(MAX_DOCUMENT_XML_BYTES + 1)
+        if len(xml) > MAX_DOCUMENT_XML_BYTES:
+            raise UnsafeDocument(f"{name}: больше потолка {MAX_DOCUMENT_XML_BYTES} байт")
+    _refuse_dtd(xml)
+    # Подавление B314 обосновано: документ без DTD (проверено выше) не может объявить ни
+    # внешних, ни внутренних сущностей — разбирать штатным ElementTree безопасно.
+    body = ET.fromstring(xml).find(f"{_W}body")  # nosec B314
     if body is None:
         return []
 

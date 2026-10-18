@@ -116,3 +116,87 @@ def test_reading_and_slicing_work_together(документ):
 
     якоря = specs.extract_anchors(req[1].text, api_prefix="/api/v1", tables={"task"})
     assert якоря["api"] == ["/api/v1/splits/{id}/calculate"]
+
+
+# --- враждебный XML --------------------------------------------------------
+#
+# Документ от аналитика — чужой файл. Обе классические атаки на XML живут в DTD, а Word
+# его в `document.xml` не пишет: документ с DTD отклоняется до разбора, а не «разбирается
+# осторожно» в надежде на версию expat у потребителя.
+
+
+def _архив(tmp_path, xml):
+    path = tmp_path / "враждебная.docx"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("word/document.xml", xml)
+    return path
+
+
+МИЛЛИАРД_СМЕШКОВ = (
+    '<?xml version="1.0"?>\n<!DOCTYPE lolz [\n<!ENTITY lol "lol">\n'
+    + "".join(
+        f'<!ENTITY lol{i} "{("&lol" + (str(i - 1) if i > 1 else "") + ";") * 10}">\n'
+        for i in range(1, 10)
+    )
+    + f']>\n<w:document xmlns:w="{W}"><w:body><w:p><w:r><w:t>&lol9;</w:t></w:r></w:p>'
+    "</w:body></w:document>"
+)
+
+ВНЕШНЯЯ_СУЩНОСТЬ = (
+    '<?xml version="1.0"?>\n<!DOCTYPE d [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>\n'
+    f'<w:document xmlns:w="{W}"><w:body><w:p><w:r><w:t>&xxe;</w:t></w:r></w:p>'
+    "</w:body></w:document>"
+)
+
+
+@pytest.mark.parametrize("xml", [МИЛЛИАРД_СМЕШКОВ, ВНЕШНЯЯ_СУЩНОСТЬ], ids=["laughs", "xxe"])
+def test_a_document_with_a_dtd_is_refused(tmp_path, xml):
+    with pytest.raises(specs.UnsafeDocument):
+        read_docx(_архив(tmp_path, xml))
+
+
+def test_a_bare_doctype_is_refused_too(tmp_path):
+    """Отказ по самому объявлению, а не по тому, что в нём: разбирать DTD не нужно вовсе."""
+    xml = f'<!DOCTYPE d><w:document xmlns:w="{W}"><w:body/></w:document>'
+    with pytest.raises(specs.UnsafeDocument):
+        read_docx(_архив(tmp_path, xml))
+
+
+def test_a_broken_xml_still_fails_as_elementtree_says(tmp_path):
+    """Предварительный проход не подменяет тип ошибки: о синтаксисе говорит ElementTree."""
+    import xml.etree.ElementTree as ET
+
+    with pytest.raises(ET.ParseError):
+        read_docx(_архив(tmp_path, f'<w:document xmlns:w="{W}"><w:body>'))
+
+
+def test_a_document_over_the_ceiling_is_refused_before_reading(tmp_path, monkeypatch):
+    """Zip-бомба: сжатое — килобайты, распакованное — гигабайты."""
+    monkeypatch.setattr(specs, "MAX_DOCUMENT_XML_BYTES", 1000)
+    xml = f'<w:document xmlns:w="{W}"><w:body>' + "<w:p/>" * 1000 + "</w:body></w:document>"
+    with pytest.raises(specs.UnsafeDocument, match="потолок"):
+        read_docx(_архив(tmp_path, xml))
+
+
+def test_a_document_under_the_ceiling_is_read(tmp_path, monkeypatch):
+    monkeypatch.setattr(specs, "MAX_DOCUMENT_XML_BYTES", 10_000)
+    xml = f'<w:document xmlns:w="{W}"><w:body><w:p><w:r><w:t>есть</w:t></w:r></w:p></w:body></w:document>'
+    assert [b.text for b in read_docx(_архив(tmp_path, xml))] == ["есть"]
+
+
+def test_the_ceiling_itself_is_allowed(tmp_path, monkeypatch):
+    """Граница — «больше потолка», а не «не меньше»."""
+    xml = f'<w:document xmlns:w="{W}"><w:body><w:p><w:r><w:t>к</w:t></w:r></w:p></w:body></w:document>'
+    monkeypatch.setattr(specs, "MAX_DOCUMENT_XML_BYTES", len(xml.encode("utf-8")))
+    assert [b.text for b in read_docx(_архив(tmp_path, xml))] == ["к"]
+    monkeypatch.setattr(specs, "MAX_DOCUMENT_XML_BYTES", len(xml.encode("utf-8")) - 1)
+    with pytest.raises(specs.UnsafeDocument):
+        read_docx(_архив(tmp_path, xml))
+
+
+def test_an_archive_without_the_document_says_so(tmp_path):
+    path = tmp_path / "не-ворд.docx"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("readme.txt", "привет")
+    with pytest.raises(ValueError, match="нет word/document.xml"):
+        read_docx(path)

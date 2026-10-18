@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "partest-atlas"
-version = "0.1.0"
+version = "0.2.0"
 description = "Сбор наблюдений о системе и о прогоне тестов в версионированные артефакты — агент карты «Веха»"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,6 +15,7 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Framework :: Pytest",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Topic :: Software Development :: Testing",
@@ -60,8 +61,8 @@ partest_atlas_ui_flow = "partest_atlas.plugins.ui_flow"
 # тому, кто её позвал. Объявленный, но отсутствующий **плагин** мешает всем и
 # всегда, включая прогоны, которые про карту ничего не знают.
 #
-# Маркера требований здесь нет и не будет — он живёт в partest, потому что
-# полезен и без карты.
+# Маркера требований (`req`) здесь нет: по замыслу ему место в partest, потому что он
+# полезен и без карты, — но и в partest его пока нет.
 
 [tool.setuptools.packages.find]
 include = ["partest_atlas*"]

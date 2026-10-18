@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,6 +72,31 @@ class Config:
     def path_for(self, kind: str) -> Path:
         """Куда класть артефакт этого вида — с учётом раскладки по системе и контуру."""
         return self.scope.path(self.artifacts_dir, kind)
+
+
+def non_negative(
+    section: Dict[str, Any], key: str, default: float, kind: type, *, where: str
+) -> Any:
+    """Конечное неотрицательное число из раздела. Нет ключа — умолчание; `0` — это `0`,
+    а не умолчание; кривое значение (в том числе `.nan` и `.inf` YAML) — `ValueError`
+    с именем ключа: вызывающий сообщает о нём как об ошибке конфигурации, а не роняет
+    прогон INTERNALERROR или вечным сном."""
+    raw = section.get(key)
+    if raw is None:
+        return kind(default)
+    try:
+        if isinstance(raw, bool):
+            raise ValueError
+        if isinstance(raw, float) and not math.isfinite(raw):
+            raise ValueError
+        value = kind(raw)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError
+        if kind is int and isinstance(raw, float) and raw != value:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{where}.{key}={raw!r}: ожидалось неотрицательное число") from None
+    return value
 
 
 def find(start: Optional[Path] = None) -> Optional[Path]:

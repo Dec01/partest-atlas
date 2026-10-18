@@ -1,7 +1,8 @@
 """Плагин: снять поток шины вокруг прогона. Молчит, пока его не включили.
 
 Включается переменной ``ATLAS_BUS_FLOW``. Пока она не выставлена, плагин загружен и не
-делает ничего — ни соединений, ни импорта клиента шины.
+делает ничего — ни соединений, ни импорта клиента шины. Под pytest-xdist мерит только
+контроллер: воркеры молчат.
 
 **Три исхода, а не два.** Сборщик необязательный и прогон не роняет, но молчать об
 этом по-разному нельзя:
@@ -26,7 +27,7 @@ from typing import Any, Dict, List, Optional
 from partest_atlas import artifacts
 from partest_atlas.collect import bus_flow
 from partest_atlas.collect.bus_flow import ReaderNotConfigured
-from partest_atlas.config import Config, load
+from partest_atlas.config import Config, load, non_negative
 
 ENABLE_ENV = "ATLAS_BUS_FLOW"
 MARKER = "bus_flow"
@@ -51,17 +52,28 @@ def pytest_configure(config) -> None:
     _state.clear()
     if not _on():
         return
+    if hasattr(config, "workerinput"):
+        # Воркер pytest-xdist: смещения снимает контроллер на весь прогон. Окно каждого
+        # воркера видело бы те же события, и они посчитались бы по разу на воркер, а
+        # дописывание одного файла из нескольких процессов не согласовано.
+        return
     try:
         cfg: Config = load()
+        section = cfg.section(MARKER)
+        settle = non_negative(
+            section, "settle_sec", bus_flow.DEFAULT_SETTLE_SEC, float, where=MARKER
+        )
     except Exception as exc:
         _note(f"{type(exc).__name__}: {exc}", misconfigured=True)
+        # Строка `note` в состоянии — не включённый плагин: дальше хуки шли бы в
+        # раздел, которого нет.
+        _state.clear()
         return
-    section = cfg.section(MARKER)
     _state.update(
         config=cfg,
         section=section,
         include=list(section.get("include") or []),
-        settle=float(section.get("settle_sec") or bus_flow.DEFAULT_SETTLE_SEC),
+        settle=settle,
         records=[],
     )
 

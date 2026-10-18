@@ -6,7 +6,8 @@
 необратимо, — это **формат артефактов**. Его читает чужая программа, и у неё нет способа
 проверить себя, кроме как этой командой.
 
-Ничего не пишет и не изменяет: обе подкоманды только читают.
+Ничего не пишет и не изменяет: `show` и `check` только читают, `wrap` запускает чужую
+команду и сам ничего не пишет.
 """
 
 from __future__ import annotations
@@ -71,14 +72,31 @@ def _cmd_check(paths: Sequence[str], *, as_json: bool) -> int:
 
 
 def _cmd_show(paths: Sequence[str], *, as_json: bool) -> int:
-    targets = _iter_paths(paths)
+    # Несуществующий путь — команда не состоялась, а не «показала пустой артефакт»:
+    # `read` снисходителен и отдал бы `{}`, а шапка из одних `None` с кодом 0 выглядела
+    # как успех. Существующие пути при этом всё равно показываются.
+    missing = [p for p in paths if not Path(p).exists()]
+    for path in missing:
+        print(f"нет такого пути: {path}", file=sys.stderr)
+    targets = _iter_paths([p for p in paths if p not in missing])
     if not targets:
-        print("показывать нечего: ни одного файла артефакта по указанным путям", file=sys.stderr)
+        if not missing:
+            print(
+                "показывать нечего: ни одного файла артефакта по указанным путям",
+                file=sys.stderr,
+            )
         return 1
 
     rows = []
+    unreadable = 0
     for path in targets:
         doc = artifacts.read(path)
+        if not isinstance(doc, dict) or not doc.get("kind"):
+            # Пустой, битый или чужой JSON: `read` снисходителен и отдал бы его как есть,
+            # а шапка из `None` с кодом 0 выдала бы его за показанный артефакт.
+            print(f"не артефакт (нет поля kind; пуст, битый или чужой JSON): {path}", file=sys.stderr)
+            unreadable += 1
+            continue
         # Списки записей — всё, что не служебная шапка: их размер и есть содержание.
         head = {"version", "kind", "scope", "collected_at", "collector"}
         payload = {k: v for k, v in doc.items() if k not in head}
@@ -109,7 +127,7 @@ def _cmd_show(paths: Sequence[str], *, as_json: bool) -> int:
             )
             for key, size in (row["payload"] or {}).items():
                 print(f"    {key}: {size}")
-    return 0
+    return 1 if missing or unreadable else 0
 
 
 def _cmd_wrap(command: Sequence[str]) -> int:
@@ -143,8 +161,11 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     p_wrap = sub.add_parser(
         "wrap",
-        help="выполнить чужую команду и снять наблюдения вокруг неё",
-        description="Код возврата отдаётся команды, а не обёртки.",
+        help="выполнить чужую команду и вернуть её код возврата",
+        description=(
+            "Возвращается код возврата самой команды, а не обёртки. Снимков «до» и «после» "
+            "команда пока не делает: она только запускает прогон."
+        ),
     )
     p_wrap.add_argument("rest", nargs=argparse.REMAINDER, help="-- и сама команда")
 
@@ -153,8 +174,10 @@ def main(argv: Iterable[str] | None = None) -> int:
     if args.command == "check":
         return _cmd_check(args.paths, as_json=args.json)
     if args.command == "wrap":
-        # Ведущий `--` argparse оставляет в остатке; команде он не нужен.
-        return _cmd_wrap([a for a in args.rest if a != "--"])
+        # Ведущий `--` argparse оставляет в остатке; он разделитель обёртки, команде не
+        # нужен. Остальные `--` — команды: `npm test -- --grep smoke`.
+        rest = list(args.rest)
+        return _cmd_wrap(rest[1:] if rest[:1] == ["--"] else rest)
     return _cmd_show(args.paths, as_json=args.json)
 
 
