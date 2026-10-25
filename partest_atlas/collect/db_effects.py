@@ -34,6 +34,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+from partest_atlas.adapters.postgres import read_only
+
 KIND = "db.effects"
 
 STATS_SQL = """
@@ -121,9 +123,12 @@ class DbEffects:
         PostgreSQL кэширует статистику на время транзакции: два запроса подряд в одной
         транзакции вернут одно и то же, и дельта выходила нулевой. Поэтому закрываем
         открытую транзакцию и явно сбрасываем кэш снимка.
+
+        Каждый снимок — в своей транзакции только на чтение
+        (:func:`~partest_atlas.adapters.postgres.read_only`): запрет записи держит база.
         """
         self._rollback()
-        with self.conn.cursor() as cur:
+        with read_only(self.conn), self.conn.cursor() as cur:
             cur.execute("SELECT pg_stat_clear_snapshot()")
             cur.execute(STATS_SQL, {"schemas": self.schemas})
             rows = {r["table_name"]: r for r in cur.fetchall()}
@@ -131,7 +136,7 @@ class DbEffects:
         return rows
 
     def active_sessions(self) -> int:
-        with self.conn.cursor() as cur:
+        with read_only(self.conn), self.conn.cursor() as cur:
             cur.execute(ACTIVE_SESSIONS_SQL)
             row = cur.fetchone()
         self._rollback()

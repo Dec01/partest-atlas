@@ -25,6 +25,8 @@ import subprocess
 import sys
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
+from partest_atlas.lang import t
+
 #: Код, которым отвечаем, когда команду не удалось даже запустить. Отдельный от кодов
 #: самой команды настолько, насколько возможно: «не запустилось» и «отработало плохо» —
 #: разные новости.
@@ -52,7 +54,11 @@ _CMD_REFUSE = set('"%\r\n\x00&|<>^')
 #: кавычках, и скрипт его как аргумент не разбирает.
 _CMD_REFUSE_IN_PATH = set('"%\r\n\x00')
 
-_HINT = "вызовите интерпретатор напрямую, без скрипта-обёртки: `node …`, `java …`, `python …`"
+def _hint() -> str:
+    return t(
+        "вызовите интерпретатор напрямую, без скрипта-обёртки: `node …`, `java …`, `python …`",
+        "call the interpreter directly, without a wrapper script: `node …`, `java …`, `python …`",
+    )
 
 
 class _Refused(ValueError):
@@ -108,7 +114,10 @@ def _system_cmd(system_root: Optional[str]) -> str:
     CreateProcess нашёл бы `cmd.exe` в текущем каталоге."""
     root = (system_root or "").strip()
     if not root or not ntpath.isabs(root):
-        raise _Refused("SystemRoot не задан или не абсолютный — системный cmd.exe не найти")
+        raise _Refused(t(
+            "SystemRoot не задан или не абсолютный — системный cmd.exe не найти",
+            "SystemRoot is not set or not absolute — the system cmd.exe cannot be found",
+        ))
     return ntpath.join(root, "System32", "cmd.exe")
 
 
@@ -153,10 +162,12 @@ def _cmd_quote(arg: str, number: int = 0) -> str:
         # Значение не печатается: отказанным аргументом бывает пароль, а сообщение
         # уходит в stderr и лог конвейера. Номер и символы — достаточно, чтобы найти.
         shown = " ".join(repr(c) for c in bad)
-        raise _Refused(
+        raise _Refused(t(
             f"аргумент №{number} содержит {shown}: скрипту .cmd/.bat его не передать "
-            f"безопасно — кавычки снимает и cmd.exe, и сам скрипт; {_HINT}"
-        )
+            f"безопасно — кавычки снимает и cmd.exe, и сам скрипт; {_hint()}",
+            f"argument #{number} contains {shown}: it cannot be passed to a .cmd/.bat script "
+            f"safely — both cmd.exe and the script strip quotes; {_hint()}",
+        ))
     if arg and not set(arg) & _CMD_QUOTE_IF:
         return arg
     # Хвостовые `\` перед закрывающей кавычкой удваиваются по правилам MSVCRT, как у
@@ -169,7 +180,11 @@ def _cmd_quote(arg: str, number: int = 0) -> str:
 def _quote_path(path: str) -> str:
     bad = sorted(set(path) & _CMD_REFUSE_IN_PATH)
     if bad:
-        raise _Refused(f"путь {path!r} содержит {' '.join(map(repr, bad))}: через cmd.exe не запустить")
+        shown = " ".join(map(repr, bad))
+        raise _Refused(t(
+            f"путь {path!r} содержит {shown}: через cmd.exe не запустить",
+            f"path {path!r} contains {shown}: cannot be run through cmd.exe",
+        ))
     return f'"{path}"'
 
 
@@ -220,23 +235,35 @@ def _command_line(
     if found is None:
         if _has_dir(argv[0]):
             if _suffix(argv[0]) in _BATCH_SUFFIXES:
-                raise _Refused(f"скрипт {argv[0]!r} не найден по указанному пути")
+                raise _Refused(t(
+                    f"скрипт {argv[0]!r} не найден по указанному пути",
+                    f"script {argv[0]!r} not found at the given path",
+                ))
             return argv
         nearby = _found_nearby(argv[0], path_env=path_env, cwd=cwd, isfile=isfile)
         if nearby is not None:
-            raise _Refused(
+            raise _Refused(t(
                 f"{argv[0]!r} нашёлся только в текущем каталоге или по относительной записи "
                 f"PATH ({nearby}) — такое не запускается по голому имени; назовите путём: "
-                f"`.\\{argv[0]}`"
-            )
+                f"`.\\{argv[0]}`",
+                f"{argv[0]!r} was found only in the current directory or through a relative "
+                f"PATH entry ({nearby}) — it is not run by a bare name; name it by path: "
+                f"`.\\{argv[0]}`",
+            ))
         if _suffix(argv[0]) in _BATCH_SUFFIXES:
-            raise _Refused(f"скрипт {argv[0]!r} не найден в PATH; назовите его путём")
+            raise _Refused(t(
+                f"скрипт {argv[0]!r} не найден в PATH; назовите его путём",
+                f"script {argv[0]!r} not found in PATH; name it by path",
+            ))
         return argv
     suffix = _suffix(found)
     if suffix in _BINARY_SUFFIXES:
         return [found, *argv[1:]]
     if suffix not in _BATCH_SUFFIXES:
-        raise _Refused(f"{found!r} — не исполняемый файл Windows (.exe, .com, .cmd, .bat)")
+        raise _Refused(t(
+            f"{found!r} — не исполняемый файл Windows (.exe, .com, .cmd, .bat)",
+            f"{found!r} is not a Windows executable (.exe, .com, .cmd, .bat)",
+        ))
     inner = " ".join(
         [_quote_path(found.rstrip(" .")), *(_cmd_quote(a, n) for n, a in enumerate(argv[1:], 1))]
     )
@@ -266,27 +293,32 @@ def run(
     """
     notes: List[str] = []
     if not command:
-        return WrapResult(EXIT_CANNOT_RUN, {}, ["команда не задана — оборачивать нечего"])
+        return WrapResult(EXIT_CANNOT_RUN, {}, [t("команда не задана — оборачивать нечего",
+                                                  "no command given — nothing to wrap")])
 
     try:
         prepared = _command_line(command)
     except _Refused as exc:
-        return WrapResult(EXIT_CANNOT_RUN, {}, [f"команда не запущена: {exc}"])
+        return WrapResult(EXIT_CANNOT_RUN, {}, [t(f"команда не запущена: {exc}",
+                                                  f"command not run: {exc}")])
 
     state = None
     if before is not None:
         try:
             state = before()
         except Exception as exc:
-            notes.append(f"снимок «до» не снялся ({type(exc).__name__}: {exc})")
+            notes.append(t(f"снимок «до» не снялся ({type(exc).__name__}: {exc})",
+                           f"the 'before' snapshot failed ({type(exc).__name__}: {exc})"))
 
     try:
         completed = runner(prepared)
         code = int(getattr(completed, "returncode", 1))
     except FileNotFoundError:
-        return WrapResult(EXIT_CANNOT_RUN, {}, [*notes, f"команда не найдена: {command[0]}"])
+        return WrapResult(EXIT_CANNOT_RUN, {}, [*notes, t(f"команда не найдена: {command[0]}",
+                                                          f"command not found: {command[0]}")])
     except Exception as exc:
-        return WrapResult(EXIT_CANNOT_RUN, {}, [*notes, f"команда не запустилась: {exc}"])
+        return WrapResult(EXIT_CANNOT_RUN, {}, [*notes, t(f"команда не запустилась: {exc}",
+                                                          f"command failed to start: {exc}")])
 
     records: Dict[str, List[dict]] = {}
     if after is not None and state is not None:
@@ -294,6 +326,7 @@ def run(
             records = after(state) or {}
         except Exception as exc:
             # Сбор провалился — прогон здесь ни при чём, и его код остаётся прежним.
-            notes.append(f"снимок «после» не снялся ({type(exc).__name__}: {exc})")
+            notes.append(t(f"снимок «после» не снялся ({type(exc).__name__}: {exc})",
+                           f"the 'after' snapshot failed ({type(exc).__name__}: {exc})"))
 
     return WrapResult(code, records, notes)

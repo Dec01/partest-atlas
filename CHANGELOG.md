@@ -4,6 +4,95 @@
 в `partest_atlas/artifacts.py` и отдельной записи здесь: артефакт читает чужая программа,
 и молчаливая правка формата ломает её.
 
+## Unreleased
+
+Сборщики из командной строки: контракт OpenAPI, схема базы и журналы контейнеров снимаются
+без кода в проекте. `SCHEMA_VERSION` остаётся 2 — новые поля аддитивны (см. Compatibility).
+
+### Added
+
+- **`partest-atlas collect openapi [--service ИМЯ]`** — контракт из
+  `confpartest.swagger_files` проекта (`{"имя": ["local"|"url", путь_или_адрес]}`) в
+  `contract.openapi`. `confpartest.py` загружает `partest.load_confpartest` (это импорт кода
+  проекта, как при прогоне pytest); загруженный модуль обязан быть `confpartest.py` из
+  каталога проекта, иначе отказ: чужой `confpartest` с тем же именем дал бы чужой контракт.
+  Локальный путь — от каталога `confpartest.py`; адрес — клиентом `partest.httpx_client`
+  под политикой TLS проекта (`tls_verify`), `user:password@` из адреса уходит в `auth`.
+  Без `--service` спецификация должна быть одна — первую из нескольких молча не берём.
+  Документ должен быть объектом с ключом `openapi` или `swagger` (JSON или YAML).
+- **`contract.openapi`: `info` и `source`** (набор 0.3.0, пп. 3 и 16). `info` —
+  `{title, version}` строками или `null`, пишет и `openapi.build()`; `source` —
+  `{service, type: local|url, location}`: адрес без учётных данных, строки запроса и якоря и
+  через `partest.redact.redact_text`, локальный путь — как объявлен в `confpartest.py`.
+  `openapi.build(document, *, source=None)`, `info_of`, `redact_url`, `source_of`,
+  `load_from_confpartest`, `write` — новые функции модуля.
+- **`partest-atlas collect db-schema`** — существующий `db_schema.write()` из командной
+  строки. `database.schemas: auto` — все несистемные схемы (кроме `pg_catalog`,
+  `information_schema` и `pg_*`), какие видит база. `database.key` — ключ базы в артефакте
+  (по умолчанию `primary`, как было; п. 7).
+- **`partest-atlas collect container-logs`** — связи из журналов в `containers.logs`, только
+  при объявленном `container_logs.source`; без него, без правил или если источник вернул не
+  словарь «контейнер → текст» — отказ с кодом 2, артефакт не пишется. Словари для
+  `known_only` — из уже снятых `db.schema` и `bus.flow` той же области.
+  `container_logs.collect()`/`write()` — то же из кода.
+- **Общее у `collect`:** `--root` (откуда искать `atlas.yaml` и `confpartest.py`; по
+  умолчанию текущий каталог, `confpartest.py` — в каталоге `atlas.yaml`), `--system`/`--env`
+  поверх `ATLAS_SYSTEM`/`ATLAS_ENV`; запись — `artifacts.write` в
+  `<artifacts_dir>/<система>/<контур>/`. Часть области — имя каталога: `..`, `/`, `\`, `:` —
+  отказ, запись за пределы каталога артефактов невозможна. Каталог проекта ставится в начало
+  `sys.path`: `database.connect` и `container_logs.source` называют модули проекта. Неудача —
+  одна строка в stderr (через `partest.redact`) и код 2; `--json` — отчёт машине.
+- **`--lang ru|en` и язык по локали.** Без ключа — `LC_ALL`, `LC_MESSAGES`, `LANG`, затем
+  локаль процесса; `ru*` — русский, другой язык — английский, `C`/`POSIX`/неопределимая —
+  русский, как раньше. Переводятся справка, вывод `check`, `show`, `wrap`, `collect`, тексты
+  расхождений `artifacts.validate` и сообщения ошибок конфигурации, соединения, журналов и
+  обёртки. Код, который зовёт функции пакета сам, получает русский: язык переключает только
+  команда и только на время вызова. Модуль `partest_atlas.lang`.
+- **`adapters.postgres.read_only(conn)`** — блок транзакции только на чтение:
+  `BEGIN TRANSACTION READ ONLY`, `SET TRANSACTION READ ONLY`, проверка
+  `SHOW transaction_read_only` = `on`, на выходе `ROLLBACK`. Без подтверждения базы —
+  `NotReadOnly`, ни одного запроса сборщика. Только уровень транзакции: настройка сессии
+  пережила бы нас на соединении из пула проекта. Там же `schemas_from`, `discover_schemas`.
+
+### Changed
+
+- **Пол partest — 2.6.0** (было `>=1.8`), и пакет теперь его импортирует — только команда
+  `collect` и только при вызове: `load_confpartest`, `httpx_client`, `partest.tls`,
+  `partest.redact.redact_text`, `partest.sideeffects.assert_read_only_sql`. Плагины без своих
+  переменных partest не импортируют. Почему 2.6.0: до него импорт partest читал файл проекта
+  и загружал OpenAPI по сети прямо на импорте модуля покрытия — недоступный адрес ронял даже
+  `from partest import httpx_client`, а исходящий запрос на импорте нарушал бы красную линию
+  «нулевой исходящий трафик».
+- **Базы только на чтение — механизмом.** `db_schema.collect()` и каждый снимок `db_effects`
+  идут в транзакции `read_only()`; запросы `db_schema` до отправки проходят
+  `partest.sideeffects.assert_read_only_sql` (одиночный `SELECT` или `ValueError`). Раньше
+  «только чтение» держалось тем, что запросы написаны как `SELECT` (proposals D).
+- **Пустая схема — громкая ошибка.** `db_schema.collect()` поднимает `NoTables`, если в
+  выбранных схемах нет ни одной таблицы (или у `auto` нет ни одной схемы), вместо пустого
+  артефакта; плагин `db_effects` при пустой статистике выключается как ошибка конфигурации,
+  а не пишет пустую дельту. `schemas: public` строкой теперь одна схема (раньше — список её
+  букв и молча пусто); не список строк и не строка — `ValueError`.
+- **`db_effects` открывает соединение, только когда есть что мерить** (запись 2026-10-07).
+  Ни одного теста под замером или `--collect-only` — соединения нет вовсе, артефакт не
+  пишется (раньше — дельта всего прогона). Дельту всего прогона без маркеров —
+  `ATLAS_DB_EFFECTS_ALL=1`. Режим `session` открывает соединение после отбора тестов, режим
+  `test` — перед первым тестом под замером и закрывает сразу после последнего. Под xdist
+  контроллер маркеров не видит — там соединение по-прежнему открывается в начале сессии.
+  `database.schemas: auto` понимает и плагин.
+- `db_schema.write(..., scope=None)` и `build(..., key="primary")` — новые необязательные
+  аргументы.
+
+### Compatibility
+
+- **Формат аддитивен, `SCHEMA_VERSION` 2.** В `contract.openapi` добавлены `info` и
+  `source`; читатель, не знающий их, их не видит. Ключ базы в `db.schema` по-прежнему
+  `primary`, пока проект не задал `database.key`.
+- **Изменение поведения у вызывающих из кода:** `db_schema.collect()`/`write()` поднимают
+  `NoTables` там, где раньше писали пустой артефакт, и `NotReadOnly`, если база не
+  подтвердила режим; соединение, которое отдаёт `database.connect`, должно принимать
+  `BEGIN`/`SET TRANSACTION`/`SHOW`/`ROLLBACK` (любой драйвер PostgreSQL принимает).
+- `db_effects` без тестов под замером больше не пишет дельту прогона — см. Changed.
+
 ## 0.2.2 — 2026-10-25
 
 Исправление выпуска 0.2.1. Совместимо с 0.2.1; `SCHEMA_VERSION` не меняется.

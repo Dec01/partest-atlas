@@ -60,8 +60,9 @@ def test_mode_is_chosen_by_how_many_tests_are_measured(отобрано, пре�
     assert plugin.choose_mode(отобрано, предел) == режим
 
 
-def test_zero_selected_still_measures_the_session():
-    """Мерить поштучно нечего, но общая дельта прогона осмысленна."""
+def test_zero_selected_is_session_by_the_rule_but_opens_nothing():
+    """Правило режима ноль относит к сессии, но плагин при нуле тестов под замером
+    соединения не открывает вовсе — см. `test_no_measured_test_opens_no_connection`."""
     assert plugin.choose_mode(0, 12) == db_effects.SESSION
 
 
@@ -154,7 +155,11 @@ class ФейковаяБаза:
                 return False
 
             def execute(self_, sql, params=None):
-                if "pg_stat_clear_snapshot" in sql:
+                if "transaction_read_only" in sql:
+                    self_.строки = [{"transaction_read_only": "on"}]
+                elif sql.lstrip().startswith(("BEGIN", "SET", "ROLLBACK")):
+                    self_.строки = []
+                elif "pg_stat_clear_snapshot" in sql:
                     self_.строки = []
                 elif "pg_stat_activity" in sql:
                     self_.строки = [{"n": 0}]
@@ -698,3 +703,227 @@ def test_a():
     )
     result.assert_outcomes(passed=1)
     assert [(r["test"], r["scope"]) for r in doc["records"]] == [("test_a", db_effects.TEST)]
+
+
+# --- соединение открывается, только когда есть что мерить ------------------------
+
+
+@pytest.fixture
+def журнал_соединений(прогон, pytester, monkeypatch):
+    """Фейковая база, которая отмечает в `порядок.txt`, когда соединение открыто и закрыто.
+
+    Тесты вложенного прогона пишут туда же своё имя — по одному файлу видно, что было
+    раньше: соединение или тест.
+    """
+    import contextlib
+
+    from partest_atlas.adapters import postgres
+
+    открыто = []
+
+    def отметить(что):
+        with (pytester.path / ПОРЯДОК).open("a", encoding="utf-8") as f:
+            f.write(что + "\n")
+
+    @contextlib.contextmanager
+    def соединить(section):
+        открыто.append(True)
+        отметить("открыто")
+        try:
+            yield ФейковаяБаза(pytester.path)
+        finally:
+            отметить("закрыто")
+
+    monkeypatch.setattr(postgres, "connect", соединить)
+
+    def порядок():
+        путь = pytester.path / ПОРЯДОК
+        строки = путь.read_text(encoding="utf-8").split() if путь.exists() else []
+        return [с for с in строки if с != "сон"]
+
+    return открыто, порядок
+
+
+ОТМЕТКА = r"""
+from pathlib import Path
+
+def отметить(что):
+    with Path("порядок.txt").open("a", encoding="utf-8") as f:
+        f.write(что + "\n")
+"""
+
+
+def test_no_measured_test_opens_no_connection(прогон, журнал_соединений):
+    """Включённый плагин без тестов под замером держал соединение (и туннель проекта)
+    весь прогон — на таком оборвалась чужая ручная уборка."""
+    открыто, _ = журнал_соединений
+    result, doc = прогон(
+        "artifacts_dir: atlas\n",
+        test_без_замера="""
+from база import записать
+
+def test_a():
+    записать("orders")
+""",
+    )
+    result.assert_outcomes(passed=1)
+    result.stdout.fnmatch_lines(["*db_effects: ни один тест не выбран под замер*не открывается*"])
+    assert открыто == []
+    assert doc == {}
+
+
+def test_collect_only_opens_no_connection(прогон, журнал_соединений):
+    открыто, _ = журнал_соединений
+    result, doc = прогон(
+        "artifacts_dir: atlas\n",
+        "--collect-only",
+        test_сбор="""
+import pytest
+
+@pytest.mark.db_effects
+def test_a():
+    pass
+""",
+    )
+    assert result.ret == 0
+    assert открыто == []
+    assert doc == {}
+
+
+def test_in_test_mode_the_connection_lives_from_the_first_to_the_last_measured_test(
+    прогон, журнал_соединений
+):
+    _, порядок = журнал_соединений
+    result, doc = прогон(
+        "artifacts_dir: atlas\n",
+        test_окно=ОТМЕТКА + """
+import pytest
+from база import записать
+
+def test_1_до():
+    отметить("до")
+
+@pytest.mark.db_effects
+def test_2_замер():
+    отметить("замер-1")
+    записать("orders")
+
+@pytest.mark.db_effects
+def test_3_замер():
+    отметить("замер-2")
+
+def test_4_после():
+    отметить("после")
+""",
+    )
+    result.assert_outcomes(passed=4)
+    assert порядок() == ["до", "открыто", "замер-1", "замер-2", "закрыто", "после"]
+    assert [(r["test"], r["table"]) for r in doc["records"]] == [("test_2_замер", "orders")]
+
+
+def test_in_session_mode_the_connection_opens_before_the_first_test(прогон, журнал_соединений):
+    _, порядок = журнал_соединений
+    result, doc = прогон(
+        "artifacts_dir: atlas\ndb_effects:\n  per_test_limit: 1\n",
+        test_сессия=ОТМЕТКА + """
+import pytest
+from база import записать
+
+def test_1_до():
+    отметить("до")
+
+@pytest.mark.db_effects
+def test_2():
+    записать("orders")
+
+@pytest.mark.db_effects
+def test_3():
+    отметить("последний")
+""",
+    )
+    result.assert_outcomes(passed=3)
+    assert порядок() == ["открыто", "до", "последний", "закрыто"]
+    assert doc["records"][0]["scope"] == db_effects.SESSION
+
+
+class БазаБезТаблиц(ФейковаяБаза):
+    ТАБЛИЦЫ = ()
+
+
+def test_no_table_in_the_schemas_is_a_configuration_error_not_an_empty_delta(
+    прогон, pytester, monkeypatch
+):
+    """После переезда таблиц в другую схему плагин молча писал пустую дельту."""
+    import contextlib
+
+    from partest_atlas.adapters import postgres
+
+    @contextlib.contextmanager
+    def соединить(section):
+        yield БазаБезТаблиц(pytester.path)
+
+    monkeypatch.setattr(postgres, "connect", соединить)
+    result, doc = прогон(
+        "artifacts_dir: atlas\ndatabase:\n  schemas: [public]\n",
+        test_пусто="""
+import pytest
+
+@pytest.mark.db_effects
+def test_a():
+    pass
+""",
+    )
+    result.assert_outcomes(passed=1)
+    result.stdout.fnmatch_lines(["*ОШИБКОЙ КОНФИГУРАЦИИ*нет ни одной таблицы: public*"])
+    assert doc == {}
+
+
+def test_schemas_auto_asks_the_database_which_schemas_exist(прогон, pytester, monkeypatch):
+    import contextlib
+
+    from partest_atlas.adapters import postgres
+
+    спрошено = []
+
+    class БазаСоСхемами(ФейковаяБаза):
+        def cursor(self):
+            внутренний = super().cursor()
+            execute = внутренний.execute
+
+            def записывающий(sql, params=None):
+                if "information_schema.tables" in sql:
+                    внутренний.строки = [{"schema_name": "shop"}]
+                    return
+                if "pg_stat_user_tables" in sql and params:
+                    спрошено.append(params["schemas"])
+                execute(sql, params)
+
+            внутренний.execute = записывающий
+            return внутренний
+
+    @contextlib.contextmanager
+    def соединить(section):
+        yield БазаСоСхемами(pytester.path)
+
+    monkeypatch.setattr(postgres, "connect", соединить)
+    result, doc = прогон(
+        "artifacts_dir: atlas\ndatabase:\n  schemas: auto\n",
+        test_авто="""
+import pytest
+from база import записать
+
+@pytest.mark.db_effects
+def test_a():
+    записать("orders")
+""",
+    )
+    result.assert_outcomes(passed=1)
+    assert спрошено and all(s == ["shop"] for s in спрошено)
+    assert doc["records"][0]["table"] == "orders"
+
+
+def test_a_bad_schemas_value_leaves_the_plugin_off(monkeypatch, tmp_path, capsys):
+    _включить(monkeypatch, tmp_path, "database:\n  schemas: 5\n")
+    plugin.pytest_configure(ФейковыйConfigXdist())
+    assert not plugin._active()
+    assert "database.schemas" in capsys.readouterr().out

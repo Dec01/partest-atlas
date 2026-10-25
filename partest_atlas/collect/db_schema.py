@@ -13,6 +13,16 @@
 Подключение приходит из `atlas.yaml`, а не из кода. В прототипе путь к функции соединения
 конкретного проекта был вписан в сборщик константой — ровно та протечка проектного знания
 в пакет, которую пакет запрещает.
+
+**Только чтение держит база, а не соглашение.** Все запросы идут в транзакции, которую
+:func:`partest_atlas.adapters.postgres.read_only` перевела в режим только чтения и
+проверила; каждый запрос до отправки проходит
+`partest.sideeffects.assert_read_only_sql` — одиночный `SELECT` или отказ.
+
+**Пустая схема — громкая ошибка.** После переезда таблиц в другую схему сборщик молча
+отдавал пустой артефакт, и карта уверенно показывала «таблиц нет». Теперь «в выбранных
+схемах нет ни одной таблицы» — :class:`NoTables`; `schemas: auto` берёт все несистемные
+схемы, какие видит база.
 """
 
 from __future__ import annotations
@@ -20,10 +30,19 @@ from __future__ import annotations
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from partest_atlas import artifacts
-from partest_atlas.adapters.postgres import connect
+from partest_atlas.adapters.postgres import connect, discover_schemas, read_only, schemas_from
+from partest_atlas.artifacts import Scope
 from partest_atlas.config import Config, load
+from partest_atlas.lang import t
 
 KIND = "db.schema"
+
+#: Ключ базы в артефакте, если `database.key` не задан. Так было до появления ключа.
+DEFAULT_KEY = "primary"
+
+
+class NoTables(RuntimeError):
+    """В выбранных схемах нет ни одной таблицы — почти всегда схемы выбраны не те."""
 
 COLUMNS_SQL = """
 SELECT c.table_schema, c.table_name, c.column_name, c.ordinal_position,
@@ -99,6 +118,7 @@ def build(
     schemas: Sequence[str] = ("public",),
     exclude: Sequence[str] = (),
     label: str = "PostgreSQL",
+    key: str = DEFAULT_KEY,
 ) -> Dict[str, Any]:
     """Слепить содержание артефакта из прочитанных строк. Базы здесь нет и быть не должно."""
     excluded = {name.lower() for name in exclude}
@@ -118,9 +138,9 @@ def build(
         table_name = column["table_name"]
         if table_name.lower() in excluded:
             continue
-        key = f'{column["table_schema"]}.{table_name}'
+        table_key = f'{column["table_schema"]}.{table_name}'
         table = tables.setdefault(
-            key,
+            table_key,
             {
                 "schema": column["table_schema"],
                 "name": table_name,
@@ -144,7 +164,7 @@ def build(
     return {
         "databases": [
             {
-                "key": "primary",
+                "key": key,
                 "label": label,
                 "schemas": list(schemas),
                 "tables": ordered,
@@ -158,24 +178,60 @@ def build(
     }
 
 
+def _select(cur: Any, sql: str, params: Mapping[str, Any]) -> List[Any]:
+    """Одиночный `SELECT` или отказ до отправки — проверкой из partest."""
+    from partest.sideeffects import assert_read_only_sql  # noqa: PLC0415 — только при опросе
+
+    cur.execute(assert_read_only_sql(sql), params)
+    return cur.fetchall()
+
+
+def key_from(section: Mapping[str, Any]) -> str:
+    """Ключ базы в артефакте: `database.key`, по умолчанию `primary`."""
+    raw = section.get("key")
+    if raw is None:
+        return DEFAULT_KEY
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(t(
+            f"database.key={raw!r}: ожидалась непустая строка",
+            f"database.key={raw!r}: expected a non-empty string",
+        ))
+    return raw.strip()
+
+
 def collect(config: Optional[Config] = None, *, count_rows: bool = True) -> Dict[str, Any]:
-    """Опросить базу и слепить содержание артефакта."""
+    """Опросить базу и слепить содержание артефакта.
+
+    :class:`NoTables`, если в выбранных схемах нет ни одной таблицы;
+    :class:`~partest_atlas.adapters.postgres.NotReadOnly`, если база не подтвердила режим
+    только чтения; ``ValueError`` — кривые `database.schemas` или `database.key`.
+    """
     cfg = config or load()
     section = cfg.section("database")
-    schemas: List[str] = list(section.get("schemas") or ["public"])
+    chosen = schemas_from(section)
+    key = key_from(section)
 
     with connect(section) as conn:
-        with conn.cursor() as cur:
-            cur.execute(COLUMNS_SQL, {"schemas": schemas})
-            columns = cur.fetchall()
-            cur.execute(PRIMARY_KEYS_SQL, {"schemas": schemas})
-            primary_keys = cur.fetchall()
-            cur.execute(FOREIGN_KEYS_SQL, {"schemas": schemas})
-            foreign_keys = cur.fetchall()
+        schemas: List[str] = chosen if chosen is not None else discover_schemas(conn)
+        if not schemas:
+            raise NoTables(t(
+                "schemas: auto — у базы нет ни одной несистемной схемы с таблицами",
+                "schemas: auto — the database has no non-system schema with tables",
+            ))
+        with read_only(conn), conn.cursor() as cur:
+            columns = _select(cur, COLUMNS_SQL, {"schemas": schemas})
+            if not columns:
+                raise NoTables(t(
+                    f"в выбранных схемах нет ни одной таблицы: {', '.join(schemas)} — "
+                    "проверьте database.schemas или задайте schemas: auto",
+                    f"no table in the selected schemas: {', '.join(schemas)} — "
+                    "check database.schemas or set schemas: auto",
+                ))
+            primary_keys = _select(cur, PRIMARY_KEYS_SQL, {"schemas": schemas})
+            foreign_keys = _select(cur, FOREIGN_KEYS_SQL, {"schemas": schemas})
             row_counts: Sequence[Mapping[str, Any]] = ()
             if count_rows and section.get("count_rows", True):
-                cur.execute(APPROX_ROWS_SQL, {"schemas": schemas})
-                row_counts = cur.fetchall()
+                row_counts = _select(cur, APPROX_ROWS_SQL, {"schemas": schemas})
 
     return build(
         columns,
@@ -185,18 +241,25 @@ def collect(config: Optional[Config] = None, *, count_rows: bool = True) -> Dict
         schemas=schemas,
         exclude=section.get("exclude") or (),
         label=section.get("label") or "PostgreSQL",
+        key=key,
     )
 
 
-def write(config: Optional[Config] = None, *, count_rows: bool = True) -> Dict[str, Any]:
-    """Снять схему и положить артефакт. Возвращает содержание — для вызова из кода."""
+def write(
+    config: Optional[Config] = None, *, count_rows: bool = True, scope: Optional[Scope] = None
+) -> Dict[str, Any]:
+    """Снять схему и положить артефакт. Возвращает содержание — для вызова из кода.
+
+    *scope* — область, если не та, что в `ATLAS_SYSTEM`/`ATLAS_ENV` (ключи команды).
+    """
     cfg = config or load()
     payload = collect(cfg, count_rows=count_rows)
+    where = scope or cfg.scope
     artifacts.write(
-        cfg.path_for(KIND),
+        where.path(cfg.artifacts_dir, KIND),
         KIND,
         payload,
-        scope=cfg.scope,
+        scope=where,
         collector="partest-atlas/db_schema",
     )
     return payload

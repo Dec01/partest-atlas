@@ -189,3 +189,55 @@ def test_the_artifact_it_writes_validates_clean(tmp_path, документ):
 def test_the_kind_is_one_the_contract_knows():
     assert openapi.KIND in artifacts.KINDS
     assert artifacts.filename(openapi.KIND) == "openapi.json"
+
+
+# --- источник и info: аддитивно, схема та же --------------------------------------
+
+
+def test_info_carries_title_and_version_as_text():
+    doc = {"openapi": "3.0.0", "info": {"title": "Склад", "version": 2}, "paths": {}}
+    assert build(doc)["info"] == {"title": "Склад", "version": "2"}
+
+
+def test_no_info_is_none_not_an_empty_string():
+    assert build({"paths": {}})["info"] == {"title": None, "version": None}
+    assert build({"info": "кривое"})["info"] == {"title": None, "version": None}
+
+
+def test_build_without_a_source_has_no_source_key():
+    """Код, который строит артефакт сам (демо, тесты), получает прежнюю форму плюс `info`."""
+    assert "source" not in build({"paths": {}})
+
+
+def test_build_carries_the_source_it_is_given():
+    источник = {"service": "a", "type": "local", "location": "spec.json"}
+    assert build({"paths": {}}, source=источник)["source"] == источник
+
+
+@pytest.mark.parametrize(
+    ("адрес", "ожидалось"),
+    [
+        ("https://u:p@host.example:8443/v3/api-docs?token=x#frag", "https://host.example:8443/v3/api-docs"),
+        ("http://host/v3/api-docs", "http://host/v3/api-docs"),
+        ("https://user@host/docs?apikey=1", "https://host/docs"),
+        ("https://[::1]:9000/docs?x=1", "https://[::1]:9000/docs"),
+    ],
+)
+def test_a_url_loses_credentials_query_and_fragment(адрес, ожидалось):
+    assert openapi.redact_url(адрес) == ожидалось
+
+
+def test_the_url_source_is_redacted_and_the_local_one_kept_as_declared():
+    assert openapi.source_of("s", "url", "https://u:p@h/x?t=1") == {
+        "service": "s", "type": "url", "location": "https://h/x",
+    }
+    assert openapi.source_of("s", "file", "docs/openapi.yaml") == {
+        "service": "s", "type": "local", "location": "docs/openapi.yaml",
+    }
+
+
+def test_the_artifact_with_source_and_info_still_validates(tmp_path, документ):
+    path = tmp_path / "openapi.json"
+    payload = build(документ, source=openapi.source_of("s", "local", "spec.json"))
+    artifacts.write(path, openapi.KIND, payload, collector="partest-atlas/openapi")
+    assert artifacts.validate(artifacts.read(path)) == []

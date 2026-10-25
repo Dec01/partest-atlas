@@ -31,6 +31,19 @@
 Но «источника нет» и «я настроен неправильно» сообщаются **по-разному**: первое чинится
 на стенде, второе в `atlas.yaml`, и одинаковая строка про них стоила одному проекту
 полдня.
+
+**Соединение открывается, только когда есть что мерить.** Не выбран ни один тест под
+замером — соединения нет вовсе (и туннеля проекта тоже): такое соединение держало туннель,
+на котором оборвалась чужая ручная работа. В режиме ``session`` оно открывается после
+отбора тестов, в режиме ``test`` — перед первым тестом под замером и закрывается сразу
+после последнего. Дельту всего прогона без маркеров даёт ``ATLAS_DB_EFFECTS_ALL=1``.
+Под xdist контроллер маркеров не видит, и там соединение по-прежнему открывается в начале
+сессии.
+
+**Только чтение держит база:** каждый снимок идёт в транзакции только на чтение
+(:func:`partest_atlas.adapters.postgres.read_only`). ``database.schemas: auto`` — все
+несистемные схемы; если в выбранных схемах нет ни одной таблицы, сборщик выключается как
+ошибка конфигурации, а не пишет пустую дельту.
 """
 
 from __future__ import annotations
@@ -43,7 +56,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from partest_atlas import artifacts
-from partest_atlas.adapters.postgres import ConnectionNotConfigured
+from partest_atlas.adapters.postgres import ConnectionNotConfigured, schemas_from
 from partest_atlas.collect import db_effects
 from partest_atlas.config import Config, load, non_negative
 
@@ -118,6 +131,9 @@ def pytest_configure(config) -> None:
         section = cfg.section(MARKER)
         settle = _number(section, "settle_sec", db_effects.DEFAULT_SETTLE_SEC, float)
         limit = _number(section, "per_test_limit", DEFAULT_PER_TEST_LIMIT, int)
+        database = cfg.section("database")
+        # `None` — `schemas: auto`: какие схемы, узнаём у базы, когда соединение откроется.
+        schemas = schemas_from(database)
     except Exception as exc:
         _note(f"{type(exc).__name__}: {exc}", misconfigured=True)
         return
@@ -125,7 +141,8 @@ def pytest_configure(config) -> None:
     _state.update(
         config=cfg,
         section=section,
-        database=cfg.section("database"),
+        database=database,
+        schemas=schemas,
         include=list(section.get("include") or []),
         settle=settle,
         limit=limit,
@@ -142,7 +159,12 @@ def pytest_configure(config) -> None:
 
 
 def pytest_collection_finish(session) -> None:
-    """Режим — по тому, что действительно запустится: после `-k`, `--deselect`, `--lf`."""
+    """Режим — по тому, что действительно запустится: после `-k`, `--deselect`, `--lf`.
+
+    Здесь же решается, нужно ли соединение вообще: нет тестов под замером (или только сбор,
+    `--collect-only`) — не открывается. Режим ``session`` открывает его сейчас, до первого
+    теста; режим ``test`` — перед первым тестом под замером.
+    """
     if not _active() or _state.get("distributed"):
         return
     wanted = {
@@ -153,14 +175,23 @@ def pytest_collection_finish(session) -> None:
     _state["wanted"] = wanted
     _state["selected"] = len(wanted)
     _state["mode"] = choose_mode(len(wanted), _state["limit"])
+    if getattr(session.config.option, "collectonly", False):
+        _state["idle"] = True
+        return
+    if not wanted:
+        _state["idle"] = True
+        print("[atlas] db_effects: ни один тест не выбран под замер — соединение не открывается")
+        return
+    if _state["mode"] == db_effects.SESSION:
+        _open_session_probe()
+    else:
+        _state["remaining"] = len(wanted)
 
 
 def pytest_sessionstart(session) -> None:  # noqa: ARG001
-    if not _active():
-        return
-    probe = _open_probe(scope=db_effects.SESSION)
-    if probe is not None:
-        _state["probe"] = probe
+    """Под xdist контроллер не собирает тесты и маркеров не видит: соединение — здесь."""
+    if _active() and _state.get("distributed"):
+        _open_session_probe()
 
 
 # `tryfirst` — снаружи чужих обёрток протокола: выдержки не должны попадать внутрь
@@ -178,77 +209,132 @@ def pytest_runtest_protocol(item, nextitem):  # noqa: ARG001
     if not _active():
         return
     _state["prev_measured"] = probe is not None
-    if probe is None:
-        return
-    try:
-        _state.setdefault("records", []).extend(
-            probe.finish(test=item.name, nodeid=item.nodeid)
-        )
-    except Exception as exc:  # pragma: no cover - зависит от стенда
-        _note(f"снимок «после» теста {item.nodeid} не снялся ({type(exc).__name__}: {exc})")
+    if probe is not None:
+        try:
+            _state.setdefault("records", []).extend(
+                probe.finish(test=item.name, nodeid=item.nodeid)
+            )
+        except Exception as exc:  # pragma: no cover - зависит от стенда
+            _note(f"снимок «после» теста {item.nodeid} не снялся ({type(exc).__name__}: {exc})")
+    if "remaining" in _state and item.nodeid in (_state.get("wanted") or ()):
+        # Последний тест под замером позади — соединение больше не нужно, и держать его
+        # до конца прогона (вместе с туннелем проекта) незачем.
+        _state["remaining"] -= 1
+        if _state["remaining"] <= 0:
+            _close()
 
 
 def _open_test_probe(item):
-    """Замер одного теста на соединении сессии. Не под замером или нечем мерить — `None`."""
+    """Замер одного теста. Не под замером или нечем мерить — `None`.
+
+    Соединение открывается здесь, перед первым тестом под замером. Его первый снимок
+    проверяется, как снимок сессии: не снялся или таблиц нет — сборщик выключен.
+    """
     if not _active() or _state.get("mode") != db_effects.TEST:
         return None
     if item.nodeid not in (_state.get("wanted") or ()):
         return None
-    session_probe = _state.get("probe")
-    if session_probe is None:
+    first = "conn" not in _state
+    conn = _connection()
+    if conn is None:
         return None
     if not _state.get("prev_measured") and _state["settle"]:
         # Перед нами шёл тест без замера (или никто): его записи ещё могут ехать в
         # статистику и попали бы в наше окно.
         time.sleep(_state["settle"])
+    if first:
+        return _first_probe(db_effects.TEST, settle_sec=_state["settle"])
     try:
         return db_effects.open_effects(
-            session_probe.conn,
-            session_probe.schemas,
-            scope=db_effects.TEST,
-            settle_sec=_state["settle"],
+            conn, _state["schemas"], scope=db_effects.TEST, settle_sec=_state["settle"]
         )
     except Exception as exc:  # pragma: no cover - зависит от стенда
         _note(f"снимок «до» теста {item.nodeid} не снялся ({type(exc).__name__}: {exc})")
         return None
 
 
-def _open_probe(*, scope: str, settle_sec: float = 0.0):
-    """Открыть замер. Любая неудача выключает сборщик, но не прогон."""
-    from partest_atlas.adapters.postgres import connect  # noqa: PLC0415 — только когда включены
-
-    section = _state.get("database") or {}
-    try:
-        ctx = connect(section)
-        conn = ctx.__enter__()
-    except ConnectionNotConfigured as exc:
-        _note(str(exc), misconfigured=True)
-        _state.clear()
-        return None
-    except Exception as exc:
-        _note(f"источник недоступен ({type(exc).__name__}: {exc})")
-        _state.clear()
-        return None
-
-    schemas = list((_state.get("database") or {}).get("schemas") or ["public"])
-    try:
-        probe = db_effects.open_effects(conn, schemas, scope=scope, settle_sec=settle_sec)
-    except Exception as exc:
-        # Соединение открылось, а снимок «до» — нет (прав на статистику, схема): тоже
-        # выключенный сборщик, а не INTERNALERROR прогона.
+def _close() -> None:
+    """Закрыть соединение замера, если оно открыто."""
+    _state.pop("conn", None)
+    ctx = _state.pop("ctx", None)
+    if ctx is not None:
         try:
             ctx.__exit__(None, None, None)
         except Exception:  # pragma: no cover
             pass
-        _note(f"снимок «до» не снялся ({type(exc).__name__}: {exc})")
-        _state.clear()
+
+
+def _off(reason: str, *, misconfigured: bool = False) -> None:
+    """Выключить сборщик, но не прогон: закрыть соединение, сказать почему."""
+    _close()
+    _note(reason, misconfigured=misconfigured)
+    _state.clear()
+
+
+def _connection():
+    """Соединение замера — одно, открывается при первой нужде. Неудача выключает сборщик.
+
+    Здесь же `schemas: auto` превращается в список: какие схемы есть, знает только база.
+    """
+    if "conn" in _state:
+        return _state["conn"]
+    # Только когда включены и есть что мерить: импорт и соединение не стоят прогону ничего.
+    from partest_atlas.adapters.postgres import connect, discover_schemas  # noqa: PLC0415
+
+    try:
+        ctx = connect(_state.get("database") or {})
+        conn = ctx.__enter__()
+    except ConnectionNotConfigured as exc:
+        _off(str(exc), misconfigured=True)
+        return None
+    except Exception as exc:
+        _off(f"источник недоступен ({type(exc).__name__}: {exc})")
         return None
     _state["ctx"] = ctx
+    if _state.get("schemas") is None:
+        try:
+            _state["schemas"] = discover_schemas(conn)
+        except Exception as exc:
+            _off(f"схемы не узнать (schemas: auto) ({type(exc).__name__}: {exc})")
+            return None
+        if not _state["schemas"]:
+            _off("schemas: auto — у базы нет ни одной несистемной схемы с таблицами",
+                 misconfigured=True)
+            return None
+    _state["conn"] = conn
+    return conn
+
+
+def _first_probe(scope: str, *, settle_sec: float = 0.0):
+    """Первый снимок на соединении. Не снялся или таблиц нет — сборщик выключен."""
+    schemas = list(_state["schemas"])
+    try:
+        probe = db_effects.open_effects(_state["conn"], schemas, scope=scope, settle_sec=settle_sec)
+    except Exception as exc:
+        # Соединение открылось, а снимок «до» — нет (прав на статистику, схема): тоже
+        # выключенный сборщик, а не INTERNALERROR прогона.
+        _off(f"снимок «до» не снялся ({type(exc).__name__}: {exc})")
+        return None
+    if not probe._before:
+        # Пустая статистика — схемы не те (таблицы переехали): молча записанная пустая
+        # дельта выглядела бы как «прогон ничего не менял».
+        _off(f"в выбранных схемах нет ни одной таблицы: {', '.join(schemas)} — проверьте "
+             "database.schemas или задайте schemas: auto", misconfigured=True)
+        return None
     return probe
 
 
+def _open_session_probe() -> None:
+    """Замер сессии: соединение и снимок «до». Неудача выключает сборщик, но не прогон."""
+    if _connection() is None:
+        return
+    probe = _first_probe(db_effects.SESSION)
+    if probe is not None:
+        _state["probe"] = probe
+
+
 def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ARG001
-    if not _active():
+    if not _active() or _state.get("idle"):
         return
     probe = _state.pop("probe", None)
     records: List[dict] = list(_state.get("records") or [])
@@ -259,12 +345,7 @@ def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ARG001
         except Exception as exc:  # pragma: no cover - зависит от стенда
             _note(f"снимок «после» не снялся ({type(exc).__name__}: {exc})")
 
-    ctx = _state.pop("ctx", None)
-    if ctx is not None:
-        try:
-            ctx.__exit__(None, None, None)
-        except Exception:  # pragma: no cover
-            pass
+    _close()
 
     cfg: Optional[Config] = _state.get("config")
     if cfg is None:

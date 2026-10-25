@@ -26,6 +26,11 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
 
+from partest_atlas import artifacts
+from partest_atlas.artifacts import Scope
+from partest_atlas.config import Config, load
+from partest_atlas.lang import t
+
 KIND = "containers.logs"
 
 DEFAULT_TAIL = 2000
@@ -150,16 +155,23 @@ def open_source(section: Mapping[str, Any]):
         return None
     module_name, _, attr = str(target).partition(":")
     if not attr:
-        raise SourceNotConfigured(f"container_logs.source={target!r}: ожидалось 'модуль:функция'")
+        raise SourceNotConfigured(t(
+            f"container_logs.source={target!r}: ожидалось 'модуль:функция'",
+            f"container_logs.source={target!r}: expected 'module:function'",
+        ))
     try:
         module = importlib.import_module(module_name)
     except Exception as exc:
-        raise SourceNotConfigured(
-            f"container_logs.source={target!r} не импортируется: {exc}"
-        ) from exc
+        raise SourceNotConfigured(t(
+            f"container_logs.source={target!r} не импортируется: {exc}",
+            f"container_logs.source={target!r} cannot be imported: {exc}",
+        )) from exc
     factory = getattr(module, attr, None)
     if factory is None:
-        raise SourceNotConfigured(f"container_logs.source={target!r}: в {module_name} нет {attr!r}")
+        raise SourceNotConfigured(t(
+            f"container_logs.source={target!r}: в {module_name} нет {attr!r}",
+            f"container_logs.source={target!r}: {module_name} has no {attr!r}",
+        ))
     return factory
 
 
@@ -199,3 +211,72 @@ def build(per_container: Mapping[str, Dict[str, Dict[str, int]]]) -> Dict[str, A
             "topics": len({v for c in containers for v in (c["found"].get("topic") or {})}),
         },
     }
+
+
+def collect(config: Optional[Config] = None, *, scope: Optional[Scope] = None) -> Dict[str, Any]:
+    """Прочитать журналы из источника проекта и слепить содержание артефакта.
+
+    Только при объявленном `container_logs.source`: без него — :class:`SourceNotConfigured`,
+    а не пустой артефакт. Пустой артефакт выглядел бы как «журналы прочитаны, связей нет»,
+    хотя их никто не читал. Так же без правил: искать в журналах было бы нечего.
+
+    Словари для правил `known_only` — из артефактов `db.schema` и `bus.flow` той же
+    области, если они уже сняты.
+    """
+    cfg = config or load()
+    where = scope or cfg.scope
+    section = cfg.section("container_logs")
+    factory = open_source(section)
+    if factory is None:
+        raise SourceNotConfigured(t(
+            "container_logs.source не объявлен в atlas.yaml — журналы читать нечем; "
+            "назовите функцию проекта: source: 'модуль:функция'",
+            "container_logs.source is not declared in atlas.yaml — nothing to read logs with; "
+            "name a project function: source: 'module:function'",
+        ))
+    rules = rules_from(section)
+    if not rules:
+        raise SourceNotConfigured(t(
+            "container_logs.rules пуст или все правила выключены — искать в журналах нечего",
+            "container_logs.rules is empty or every rule is disabled — nothing to look for",
+        ))
+    logs = factory()
+    if not isinstance(logs, Mapping):
+        raise SourceNotConfigured(t(
+            f"container_logs.source вернул {type(logs).__name__}, "
+            "ожидался словарь «имя контейнера → текст журнала»",
+            f"container_logs.source returned {type(logs).__name__}, "
+            "expected a mapping 'container name -> log text'",
+        ))
+    known = known_values(
+        artifacts.read(where.path(cfg.artifacts_dir, "db.schema")),
+        artifacts.read(where.path(cfg.artifacts_dir, "bus.flow")),
+    )
+    per_container: Dict[str, Dict[str, Dict[str, int]]] = {}
+    for name, text in logs.items():
+        if isinstance(text, bytes):
+            text = text.decode("utf-8", errors="replace")
+        if text is not None and not isinstance(text, str):
+            raise SourceNotConfigured(t(
+                f"container_logs.source: журнал контейнера {name!r} — {type(text).__name__}, "
+                "ожидался текст",
+                f"container_logs.source: the log of container {name!r} is "
+                f"{type(text).__name__}, expected text",
+            ))
+        per_container[str(name)] = scan_text(text or "", rules, known)
+    return build(per_container)
+
+
+def write(config: Optional[Config] = None, *, scope: Optional[Scope] = None) -> Dict[str, Any]:
+    """Снять связи из журналов и положить артефакт. Возвращает содержание."""
+    cfg = config or load()
+    where = scope or cfg.scope
+    payload = collect(cfg, scope=where)
+    artifacts.write(
+        where.path(cfg.artifacts_dir, KIND),
+        KIND,
+        payload,
+        scope=where,
+        collector="partest-atlas/container_logs",
+    )
+    return payload

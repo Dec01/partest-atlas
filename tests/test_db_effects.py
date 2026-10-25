@@ -102,6 +102,7 @@ class ПоддельноеСоединение:
         self.сессий = сессий
         self.откатов = 0
         self.сброшено = 0
+        self.запросы = []
 
     def rollback(self):
         self.откатов += 1
@@ -117,7 +118,12 @@ class ПоддельноеСоединение:
                 return False
 
             def execute(self_, sql, params=None):
-                if "pg_stat_clear_snapshot" in sql:
+                conn.запросы.append(sql.strip())
+                if "transaction_read_only" in sql:
+                    self_.строки = [{"transaction_read_only": "on"}]
+                elif sql.lstrip().startswith(("BEGIN", "SET", "ROLLBACK")):
+                    self_.строки = []
+                elif "pg_stat_clear_snapshot" in sql:
                     conn.сброшено += 1
                     self_.строки = []
                 elif "pg_stat_activity" in sql:
@@ -184,3 +190,20 @@ def test_the_artifact_it_writes_validates_clean(tmp_path):
 def test_the_kind_is_one_the_contract_knows():
     assert db_effects.KIND in artifacts.KINDS
     assert artifacts.filename(db_effects.KIND) == "db_effects.json"
+
+
+def test_every_snapshot_query_runs_in_its_own_read_only_transaction():
+    """Только чтение держит база, а не то, что запросы написаны как `SELECT`."""
+    from partest_atlas.adapters import postgres
+
+    conn = ПоддельноеСоединение([snap(t=(0, 0, 0)), snap(t=(1, 0, 0))])
+    db_effects.open_effects(conn, ["public"]).finish()
+    блок = False
+    for sql in conn.запросы:
+        if sql == postgres.BEGIN_READ_ONLY_SQL:
+            блок = True
+        elif sql == postgres.END_SQL:
+            блок = False
+        elif sql.startswith("SELECT"):
+            assert блок, f"выборка вне транзакции только на чтение: {sql[:50]}"
+    assert conn.запросы.count(postgres.CHECK_READ_ONLY_SQL) == 4  # два снимка, два счёта сессий

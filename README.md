@@ -76,10 +76,24 @@ atlas/<система>/<контур>/ui_flow.json
 
 ## Отношение к partest
 
-В метаданных `partest-atlas` зависит от [`partest`](https://pypi.org/project/partest/)
-(`partest>=1.8`), но **код пакета partest не импортирует**: сопоставление URL с шаблоном
-OpenAPI, редактирование секретов и проверка «только `SELECT`» из partest пока не
-подключены. Обратной зависимости нет и не будет: `partest` про `partest-atlas` не знает.
+`partest-atlas` зависит от [`partest`](https://pypi.org/project/partest/) (`partest>=2.6.0`)
+и импортирует его **только в команде `collect`**: `confpartest.swagger_files` — откуда
+взять контракт, клиент HTTP под политикой TLS проекта, `partest.redact` для адреса
+спецификации и сообщений, проверка «только `SELECT`» для запросов схемы базы. Плагины
+pytest partest не импортируют. Пол 2.6.0 — с него импорт partest не читает файл проекта и не
+ходит в сеть. Сопоставление URL с шаблоном OpenAPI из partest пока не подключено. Обратной
+зависимости нет и не будет: `partest` про `partest-atlas` не знает.
+
+## Наблюдения без прогона
+
+```bash
+partest-atlas collect openapi        # контракт из confpartest.swagger_files
+partest-atlas collect db-schema      # схема базы из раздела database, только чтение
+partest-atlas collect container-logs # связи из журналов, если объявлен container_logs.source
+```
+
+Артефакт ложится в `<artifacts_dir>/<система>/<контур>/`; неудача — одна строка и код 2.
+Язык вывода — `--lang ru|en` или по локали. Подробно — `docs/wiki/components/collect.md`.
 
 Маркера трассируемости требований (`@pytest.mark.req`) нет ни здесь, ни в partest. По
 замыслу ему место в partest — он полезен и без карты, — но сделан он не был.

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from partest_atlas.artifacts import Scope
+from partest_atlas.lang import t
 
 CONFIG_NAME = "atlas.yaml"
 
@@ -126,20 +127,24 @@ def load(start: Optional[Path] = None) -> Config:
     try:
         import yaml  # noqa: PLC0415 — зависимость нужна только тем, у кого есть файл
     except ImportError as exc:  # pragma: no cover - зависит от окружения
-        raise ConfigError(
+        raise ConfigError(t(
             f"{path} есть, но PyYAML не установлен — прочитать нечем. "
-            "Поставьте partest-atlas с любым extra либо PyYAML отдельно"
-        ) from exc
+            "Поставьте partest-atlas с любым extra либо PyYAML отдельно",
+            f"{path} exists, but PyYAML is not installed to read it. "
+            "Install partest-atlas with any extra, or PyYAML on its own",
+        )) from exc
 
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except Exception as exc:
-        raise ConfigError(f"{path}: не разбирается как YAML — {exc}") from exc
+        raise ConfigError(t(f"{path}: не разбирается как YAML — {exc}",
+                            f"{path}: not valid YAML — {exc}")) from exc
 
     if raw is None:
         raw = {}
     if not isinstance(raw, dict):
-        raise ConfigError(f"{path}: ожидался объект на верхнем уровне, получено {type(raw).__name__}")
+        raise ConfigError(t(f"{path}: ожидался объект на верхнем уровне, получено {type(raw).__name__}",
+                            f"{path}: expected an object at the top level, got {type(raw).__name__}"))
 
     return Config(root=path.parent, raw=raw)
 

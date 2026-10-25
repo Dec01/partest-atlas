@@ -22,8 +22,11 @@ classifiers = [
     "Topic :: Software Development :: Testing",
 ]
 
+# partest импортируется командой `collect` (confpartest, клиент HTTP под политикой TLS,
+# redact, проверка «только SELECT»). Пол 2.6.0: раньше импорт partest грузил OpenAPI
+# по сети прямо на импорте модуля покрытия — нарушение «нулевого исходящего трафика».
 dependencies = [
-    "partest>=1.8",
+    "partest>=2.6.0",
     "PyYAML>=6.0.2",
 ]
 

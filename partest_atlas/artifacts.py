@@ -33,6 +33,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from partest_atlas.lang import t
+
 SCHEMA_VERSION = 2
 
 #: Виды артефактов. Значение — имя файла; вид пишется внутрь и проверяется при чтении.
@@ -164,48 +166,63 @@ def validate(doc: Dict[str, Any]) -> List[str]:
     problems: List[str] = []
 
     if not isinstance(doc, dict):
-        return [f"ожидался объект, получено {type(doc).__name__}"]
+        return [t(f"ожидался объект, получено {type(doc).__name__}",
+                  f"expected an object, got {type(doc).__name__}")]
     if not doc:
-        return ["документ пуст: файла нет, он нечитаем или записан не нами"]
+        return [t("документ пуст: файла нет, он нечитаем или записан не нами",
+                  "empty document: the file is missing, unreadable or not written by us")]
+
+    def missing(key: str) -> str:
+        return t(f"нет ключа '{key}'", f"no '{key}' key")
+
+    def not_text(key: str, value: Any) -> str:
+        return t(f"{key}: ожидалась непустая строка, получено {value!r}",
+                 f"{key}: expected a non-empty string, got {value!r}")
 
     version = doc.get("version")
     if "version" not in doc:
-        problems.append("нет ключа 'version'")
+        problems.append(missing("version"))
     elif not isinstance(version, int) or isinstance(version, bool):
-        problems.append(f"version: ожидалось целое, получено {version!r}")
+        problems.append(t(f"version: ожидалось целое, получено {version!r}",
+                          f"version: expected an integer, got {version!r}"))
     elif version > SCHEMA_VERSION:
-        problems.append(
+        problems.append(t(
             f"version={version} новее известной схемы {SCHEMA_VERSION}: "
-            "артефакт писал кто-то новее нас, читать его вслепую нельзя"
-        )
+            "артефакт писал кто-то новее нас, читать его вслепую нельзя",
+            f"version={version} is newer than the known schema {SCHEMA_VERSION}: "
+            "a newer writer made this artifact, reading it blindly is unsafe",
+        ))
 
     kind = doc.get("kind")
     if "kind" not in doc:
-        problems.append("нет ключа 'kind'")
+        problems.append(missing("kind"))
     elif kind not in KINDS:
-        problems.append(f"kind={kind!r} — не из набора {sorted(KINDS)}")
+        problems.append(t(f"kind={kind!r} — не из набора {sorted(KINDS)}",
+                          f"kind={kind!r} is not one of {sorted(KINDS)}"))
 
     scope = doc.get("scope")
     if "scope" not in doc:
-        problems.append("нет ключа 'scope'")
+        problems.append(missing("scope"))
     elif not isinstance(scope, dict):
-        problems.append(f"scope: ожидался объект, получено {type(scope).__name__}")
+        problems.append(t(f"scope: ожидался объект, получено {type(scope).__name__}",
+                          f"scope: expected an object, got {type(scope).__name__}"))
     else:
         for field in ("system", "env"):
             if not isinstance(scope.get(field), str) or not scope.get(field):
-                problems.append(f"scope.{field}: ожидалась непустая строка, получено {scope.get(field)!r}")
+                problems.append(not_text(f"scope.{field}", scope.get(field)))
 
     if "collected_at" not in doc:
-        problems.append("нет ключа 'collected_at'")
+        problems.append(missing("collected_at"))
     elif not isinstance(doc["collected_at"], str) or not doc["collected_at"]:
-        problems.append(f"collected_at: ожидалась непустая строка, получено {doc['collected_at']!r}")
+        problems.append(not_text("collected_at", doc["collected_at"]))
 
     # `collector` может быть пустой строкой — сборщик не обязан называться. Но ключ
     # обязан быть: его отсутствие и пустое имя отвечают на разные вопросы.
     if "collector" not in doc:
-        problems.append("нет ключа 'collector'")
+        problems.append(missing("collector"))
     elif not isinstance(doc["collector"], str):
-        problems.append(f"collector: ожидалась строка, получено {type(doc['collector']).__name__}")
+        problems.append(t(f"collector: ожидалась строка, получено {type(doc['collector']).__name__}",
+                          f"collector: expected a string, got {type(doc['collector']).__name__}"))
 
     return problems
 

@@ -8,6 +8,12 @@ from partest_atlas import artifacts, cli
 from partest_atlas.collect import db_effects
 
 
+@pytest.fixture(autouse=True)
+def русская_локаль(monkeypatch):
+    """Тексты ниже — русские; без явной локали язык вывода взялся бы у машины."""
+    monkeypatch.setenv("LC_ALL", "ru_RU.UTF-8")
+
+
 def _артефакт(tmp_path):
     path = tmp_path / "db_effects.json"
     artifacts.write(path, db_effects.KIND, {"records": []}, collector="тест")

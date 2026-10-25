@@ -12,6 +12,16 @@ allow_version_literals: true
 Хронология: что сделано с документацией и почему. Новые записи сверху.
 Формат строки: дата · операция (ingest / update / lint / restructure) · что затронуто.
 
+## 2026-10-25 · ingest · сборщики из командной строки (не выпущено)
+
+Заведена [[components/collect]]: `collect openapi|db-schema|container-logs`, источник
+контракта из `confpartest.swagger_files`, `info`/`source` в `contract.openapi`,
+`schemas: auto`, `database.key`, транзакция только на чтение, язык вывода. [[components/overview]] —
+строка `collect`, ключи `--json`/`--lang`, ленивое соединение `db_effects`;
+[[components/artifacts]] — язык текстов `validate`; [[howto/prepare-a-project]] — команды
+шага 5; [[status]] — строка «Не выпущено», 620 проверок, связь с partest, линии 2 и 6;
+[[proposals]] — дополнения к C и D.
+
 ## 2026-10-25 · update · выпуск 0.2.2
 
 Исправление 0.2.1: `__version__` отставал от метаданных колеса. Версия — один литерал в

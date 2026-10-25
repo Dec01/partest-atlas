@@ -34,6 +34,7 @@ audience: agent
 | [[components/overview]] | карта пакета: сборщики, адаптеры, плагины, обёртка |
 | [[components/artifacts]] | контракт артефактов: версия, вид, область, атомарная запись |
 | [[components/history]] | история прогонов `runner.history` и срез покрытия: ключи, `avg: null`, правило среднего, непонятый файл не трогается |
+| [[components/collect]] | `partest-atlas collect openapi\|db-schema\|container-logs`: откуда берётся, коды, только чтение механизмом, язык вывода |
 
 ## howto — как сделать
 

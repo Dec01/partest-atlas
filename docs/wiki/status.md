@@ -17,6 +17,7 @@ allow_version_literals: true
 | | |
 |---|---|
 | Версия | 0.2.2, выпуск 2026-10-25 (совместимо с 0.2.1) |
+| Не выпущено | `CHANGELOG.md`, Unreleased: `partest-atlas collect openapi\|db-schema\|container-logs` — [[components/collect]]; `contract.openapi` с `info` и `source`; `database.schemas: auto`, `database.key`, «нет ни одной таблицы» — ошибка; транзакция только на чтение механизмом (`adapters.postgres.read_only`); ленивое соединение `db_effects`; `--lang ru\|en` и язык по локали; пол partest 2.6.0. Схема — 2, аддитивно |
 | 0.2.2 | `partest_atlas.__version__` в 0.2.1 сообщал 0.2.0 (метаданные колеса — 0.2.1); номер теперь в одном месте — `partest_atlas/__init__.py`, `pyproject.toml` берёт его динамически (`CHANGELOG.md`, 0.2.2). |
 | PyPI | `partest-atlas` 0.2.0, опубликована 2026-10-18; 0.1.0 — 2026-10-01; 0.2.1 — 2026-10-25 |
 | 0.2.1 | срез покрытия под `coverage.json` partest 2.7.0 и сохранная история (`CHANGELOG.md`, 0.2.1, совместимо с 0.2.0): `avgRule`, `exception`, `scored`, объект `depth`, `avg: null` как «не измерено» (и для `0.0` при `endpoints: 0` из отчёта постарше), проверка типов недоверенного отчёта; непонятый `runs.json` не трогается: запись прогона пропускается с предупреждением `UnreadableHistory` (в 0.2.0 он молча затирался); `runs.json` — строгий JSON — [[components/history]]. |
@@ -37,13 +38,14 @@ allow_version_literals: true
 - `validate(doc)` — проверка документа на соответствие контракту. Отдельно от `read`,
   который снисходителен нарочно: снисходительность чтения держит карту на ногах,
   строгость проверки ловит того, кто пишет артефакты мимо контракта.
-- `partest_atlas/cli.py` — команда `partest-atlas`: `show`, `check` и `wrap`. Коды и
-  поведение — [[components/overview]].
+- `partest_atlas/cli.py` — команда `partest-atlas`: `show`, `check`, `wrap` и `collect`
+  (не выпущено). Коды и поведение — [[components/overview]], `collect` —
+  [[components/collect]]; язык вывода — `partest_atlas/lang.py`.
 - `wrap.py` — запуск чужого прогона, который не наш pytest; возвращается код самой
   команды, а не обёртки. На Windows скрипты `.cmd`/`.bat` идут через `cmd.exe` с отказом
   от аргументов с `% " & | < > ^` и управляющими символами — граница в
   [[components/overview]].
-- `tests/` — 516 проверок: контракт, атомарность, упаковка, девять сборщиков, три
+- `tests/` — 620 проверок: контракт, атомарность, упаковка, девять сборщиков, три
   плагина (у `db_effects` — сквозь настоящий pytest, в том числе под xdist), обёртка
   (на Windows — с настоящим `cmd.exe`), команда; срез покрытия — на образцах
   `coverage.json` двух эпох partest в `tests/data/`.
@@ -63,9 +65,10 @@ allow_version_literals: true
 
 - **снимки в команде `wrap`**: `wrap.run` принимает `before`/`after`, но
   `partest-atlas wrap` их не передаёт и только запускает команду;
-- **связь с `partest` в коде**: зависимость объявлена (`partest>=1.8`), но пакет её не
-  импортирует — `partest.redact`, `partest.path_match` и
-  `partest.sideeffects.assert_read_only_sql` не подключены;
+- **связь с `partest` вне команды `collect`** (не выпущено; пол `partest>=2.6.0`): `collect`
+  импортирует `load_confpartest`, `httpx_client`, `partest.tls`, `partest.redact` и
+  `partest.sideeffects.assert_read_only_sql` (запросы `db_schema`); `partest.path_match` не
+  подключён, а записи плагинов (`nodeid`, `test` в `db.effects`) мимо `partest.redact`;
 - маркер требований `req` — ни здесь, ни в `partest`;
 - `afterWrite` в `bus.flow` в задуманном смысле: сегодня он значит «часы HTTP видели хоть
   одну пишущую запись» — [[components/overview]];
@@ -87,6 +90,9 @@ allow_version_literals: true
 6. ~~Выпуск исправлений после сверки документации с выпущенной 0.1.0~~ — 0.2.0,
    2026-10-18.
 7. ~~Срез покрытия под `coverage.json` partest 2.7.0~~ — 0.2.1, 2026-10-25.
+8. Сборщики из командной строки, ленивое соединение `db_effects`, английский вывод — в коде,
+   не выпущено (этап 2 дорожной карты, шаг 1а). Дальше — набор формата 0.3.0 (метка прогона
+   и фазы, `collected_at` в `write`, сверка вида с именем файла и прочее).
 
 **Правило, которое держится тестом.** Строка `pytest11` в `pyproject.toml` появляется
 вместе со своим модулем — не раньше и не позже; соответствие в обе стороны проверяет
@@ -96,6 +102,8 @@ allow_version_literals: true
 
 Спорное с доводами — [[proposals]] (A–E от 2026-10-16).
 
-- Красные линии 2 и 6 в `AGENTS.md` называют `partest.sideeffects.assert_read_only_sql` и
-  `partest.redact`, а код их не вызывает: запросы сборщиков написаны как `SELECT` руками,
-  маскировки нет. Подключить или переписать линии — решение человека.
+- Красные линии 2 и 6 в `AGENTS.md` (не выпущено): линия 2 держится транзакцией только на
+  чтение у `db_schema` и `db_effects` и проверкой `assert_read_only_sql` у `db_schema`; у
+  `db_effects` запросы — константы, проверенные тестом. Линия 6: через `partest.redact` идут
+  адрес спецификации в `contract.openapi` и ошибки `collect`, но не `nodeid`/`test` в
+  `db.effects` и не текст исключений в выводе плагинов ([[proposals]], D).
