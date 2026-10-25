@@ -1,0 +1,2 @@
+# Образцы coverage.json, которые читают тесты истории: без них тесты из sdist падают.
+recursive-include tests/data *.json

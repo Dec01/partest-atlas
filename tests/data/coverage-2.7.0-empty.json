@@ -1,0 +1,39 @@
+{
+  "meta": {
+    "generated": "2026-10-20 09:00 UTC",
+    "engine": "partest",
+    "title": "sample",
+    "defaultExcluded": [],
+    "workers": 1,
+    "merged": false,
+    "partialRun": false,
+    "callsTotal": 0,
+    "unseenRatio": null,
+    "tlsVerified": true,
+    "tlsUnverifiedHosts": [],
+    "tlsUnknownHosts": [],
+    "avgRule": 2
+  },
+  "summary": {
+    "avg": null,
+    "calls": 0,
+    "full": 0,
+    "partial": 0,
+    "empty": 0,
+    "exception": 0,
+    "endpoints": 0,
+    "scored": 0,
+    "depth": null,
+    "avgAll": null
+  },
+  "services": [],
+  "subtypes": [],
+  "methods": [],
+  "missingTop": [],
+  "heatmap": {
+    "services": [],
+    "subtypes": [],
+    "cells": []
+  },
+  "endpoints": []
+}

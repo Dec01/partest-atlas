@@ -1,7 +1,7 @@
 ---
 title: Карта пакета
 status: current
-verified: 2026-10-18
+verified: 2026-10-25
 sources: [partest_atlas/__init__.py, pyproject.toml, partest_atlas/cli.py, partest_atlas/wrap.py, partest_atlas/plugins/db_effects.py, partest_atlas/collect/bus_flow.py, partest_atlas/collect/specs.py, partest_atlas/plugins/bus_flow.py]
 audience: agent
 ---

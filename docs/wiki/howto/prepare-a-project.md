@@ -1,7 +1,7 @@
 ---
 title: Как подготовить проект с автотестами к сбору
 status: current
-verified: 2026-10-18
+verified: 2026-10-25
 sources: [partest_atlas/artifacts.py, partest_atlas/cli.py, pyproject.toml]
 audience: user
 ---

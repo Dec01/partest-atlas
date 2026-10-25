@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "partest-atlas"
-version = "0.2.0"
+version = "0.2.1"
 description = "Сбор наблюдений о системе и о прогоне тестов в версионированные артефакты — агент карты «Веха»"
 readme = "README.md"
 requires-python = ">=3.10"
