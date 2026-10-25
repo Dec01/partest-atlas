@@ -1,7 +1,7 @@
 ---
 title: Контракт артефактов
 status: current
-verified: 2026-10-18
+verified: 2026-10-25
 sources: [partest_atlas/artifacts.py, partest_atlas/__init__.py]
 audience: agent
 ---

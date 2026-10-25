@@ -27,6 +27,7 @@ pytest грузит `pytest11` на старте, **до сбора тестов
 from __future__ import annotations
 
 import importlib
+import re
 import subprocess
 import sys
 from importlib import metadata
@@ -107,3 +108,34 @@ def test_installing_the_package_does_not_break_a_foreign_pytest_run(tmp_path):
         "чужой прогон не дошёл до теста при установленном partest-atlas:\n"
         f"{result.stdout[-2000:]}\n{result.stderr[-2000:]}"
     )
+
+
+def _toml_section(text: str, header: str) -> str:
+    """Тело раздела `[header]` до следующего заголовка; пусто, если раздела нет.
+
+    Регулярным выражением, а не tomllib: на 3.10 TOML в стандартной библиотеке нет, а
+    проверка источника версии должна идти на каждом поддерживаемом Python.
+    """
+    m = re.search(rf"^\[{re.escape(header)}\][ \t]*$(.*?)(?=^\[|\Z)", text, re.M | re.S)
+    return m.group(1) if m else ""
+
+
+def test_version_has_one_source():
+    """Литерал версии — только в `partest_atlas/__init__.py`; pyproject берёт его оттуда.
+
+    В 0.2.1 номер жил в двух местах, при выпуске подняли один: метаданные колеса
+    говорили 0.2.1, а публичный `partest_atlas.__version__` — 0.2.0.
+    """
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    project = _toml_section(text, "project")
+    assert project, "в pyproject.toml нет раздела [project]"
+    assert not re.search(r"^version\s*=", project, re.M), (
+        "статическая `version =` в [project] — второй источник версии"
+    )
+    assert re.search(r'^dynamic\s*=\s*\[[^\]]*"version"', project, re.M), (
+        "версия не объявлена динамической в [project]"
+    )
+    dynamic = _toml_section(text, "tool.setuptools.dynamic")
+    assert re.search(
+        r'^version\s*=\s*\{\s*attr\s*=\s*"partest_atlas\.__version__"\s*\}', dynamic, re.M
+    ), "[tool.setuptools.dynamic] не берёт версию из partest_atlas.__version__"

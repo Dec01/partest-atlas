@@ -12,6 +12,13 @@ allow_version_literals: true
 Хронология: что сделано с документацией и почему. Новые записи сверху.
 Формат строки: дата · операция (ingest / update / lint / restructure) · что затронуто.
 
+## 2026-10-25 · update · выпуск 0.2.2
+
+Исправление 0.2.1: `__version__` отставал от метаданных колеса. Версия — один литерал в
+`partest_atlas/__init__.py`, `pyproject.toml` — `dynamic = ["version"]`. [[status]] — 0.2.2, 516 проверок, «Выпущено последним» — 0.2.1;
+`CHANGELOG.md` — 0.2.2. [[components/artifacts]], [[components/overview]] и [[howto/prepare-a-project]]
+сверены: о номере версии пакета они не пишут.
+
 ## 2026-10-25 · update · выпуск 0.2.1
 
 `Unreleased` свёрнут в 0.2.1 (совместимо с 0.2.0); `pyproject.toml` — 0.2.1; [[status]] — 0.2.1. [[components/overview]] и [[howto/prepare-a-project]] сверены: в

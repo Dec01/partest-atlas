@@ -4,7 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "partest-atlas"
-version = "0.2.1"
+# Номер живёт в одном месте — `partest_atlas.__version__` (см. `[tool.setuptools.dynamic]`).
+dynamic = ["version"]
 description = "Сбор наблюдений о системе и о прогоне тестов в версионированные артефакты — агент карты «Веха»"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -63,6 +64,9 @@ partest_atlas_ui_flow = "partest_atlas.plugins.ui_flow"
 #
 # Маркера требований (`req`) здесь нет: по замыслу ему место в partest, потому что он
 # полезен и без карты, — но и в partest его пока нет.
+
+[tool.setuptools.dynamic]
+version = { attr = "partest_atlas.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["partest_atlas*"]
