@@ -54,8 +54,7 @@
   `partest.conf.parse_swagger_entry` (ошибки — `partest.conf.ConfpartestError`), документ
   загружает и разбирает `partest.openapi.resolve_swagger` — своей копии загрузки у atlas нет.
   Локальный относительный путь — по правилу partest: сначала от текущего каталога, затем от
-  каталога `confpartest.py` (одна точка в atlas, `openapi._local_place`, — до публичной
-  функции partest с этим правилом). Адрес — под политикой TLS проекта, `user:password@` — в
+  каталога `confpartest.py` (`partest.conf.resolve_entry_location`). Адрес — под политикой TLS проекта, `user:password@` — в
   `auth`; потолки: 64 МиБ документа, 60 с на шаг, 5 переадресаций, и 180 с, которые partest
   проверяет **между шагами** загрузки — это не общий предел: разрешение имени (DNS) и
   отдельный шаг им не прерываются. Адрес с сырыми

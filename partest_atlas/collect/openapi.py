@@ -307,34 +307,23 @@ def _entries(conf: Any) -> Dict[str, Any]:
     return out
 
 
-def _local_place(location: str, base: Path) -> str:
-    """Где лежит локальная запись — по правилу partest: путь, который существует от текущего
-    каталога, берётся оттуда; иначе — от каталога `confpartest.py`. Абсолютный — как есть.
-
-    TODO(partest 2.8): заменить на публичную функцию partest, разрешающую относительное
-    место записи по этому правилу, когда она появится в дереве partest_client; это
-    единственная точка вызова.
-    """
-    path = Path(location)
-    if path.is_absolute() or path.exists():
-        return str(path.resolve())
-    return str((base / path).resolve())
-
-
 def _resolve(entry: Any, base: Path, shown: str) -> Dict[str, Any]:
     """Документ записи — `partest.openapi.resolve_swagger` с потолками размера и времени."""
+    from partest.conf import resolve_entry_location  # noqa: PLC0415
     from partest.openapi import OpenApiResolveError, resolve_swagger  # noqa: PLC0415
 
-    location = entry.location if entry.kind == "url" else _local_place(entry.location, base)
+    # Относительный локальный путь — по правилу partest (как у его покрытия): от текущего
+    # каталога, если там есть файл, иначе от каталога `confpartest.py`.
+    placed = resolve_entry_location((entry.kind, entry.location), conf_dir=base)
     try:
         document = resolve_swagger(
-            (entry.kind, location),
+            (placed.kind, placed.location),
             project_root=base,
             timeout=FETCH_TIMEOUT_SEC,
             total_timeout=FETCH_TOTAL_TIMEOUT_SEC,
             max_redirects=MAX_REDIRECTS,
         )
-    except (OpenApiResolveError, OSError, ValueError) as exc:
+    except OpenApiResolveError as exc:
         # partest уже убрал из сообщения учётные данные и строку запроса; redact — вторым
         # слоем. Путь к файлу в сообщении — машины сборки, в артефакт он не попадает.
         raise SourceError(t(
@@ -359,8 +348,9 @@ def load_from_confpartest(
     размера, времени шага, времени между шагами и числа переадресаций). Любая неудача — :class:`SourceError` без секретов, и ни одна служба
     тогда не возвращается: частичный контракт выглядел бы как полный.
 
-    Локальный относительный путь — по правилу partest: сначала от текущего каталога, затем
-    от каталога `confpartest.py` (:func:`_local_place`).
+    Локальный относительный путь — по правилу partest
+    (`partest.conf.resolve_entry_location`): сначала от текущего каталога, затем от каталога
+    `confpartest.py`.
 
     `confpartest.py` импортируется (это код проекта), но **не так, как при прогоне pytest**:
     нет `conftest.py`, `pythonpath` из `pytest.ini`, `env =` из pytest-env и `.env`, который

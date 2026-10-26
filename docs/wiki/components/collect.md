@@ -75,8 +75,8 @@ swagger_files = {
   пути не исполняется. Уже загруженный в процессе чужой `confpartest` — отказ.
 - Запись `swagger_files` читает `partest.conf.parse_swagger_entry` (виды `local`, `file`,
   `path`, `url` в любом регистре), документ загружает и разбирает
-  `partest.openapi.resolve_swagger`. Локальный относительный путь — по правилу partest, как
-  у его покрытия: путь, существующий от текущего каталога, берётся оттуда, иначе — от
+  `partest.openapi.resolve_swagger`. Локальный относительный путь — по правилу partest
+  (`partest.conf.resolve_entry_location`), как у его покрытия: путь, существующий от текущего каталога, берётся оттуда, иначе — от
   каталога `confpartest.py`. Адрес — под политикой TLS проекта (`confpartest.tls_verify`,
   `PARTEST_TLS_VERIFY`), `user:password@` — в заголовок, а не в адрес запроса. Потолки:
   64 МиБ документа, 60 с на шаг (соединение, каждое чтение), 5 переадресаций и 180 с,
