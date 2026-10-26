@@ -100,9 +100,20 @@ def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ARG001
     if not links:
         print("[atlas] ui_flow: связей не зафиксировано")
         return
-    path = cfg.path_for(ui_flow.KIND)
-    doc = ui_flow.build(links)
-    artifacts.write(path, ui_flow.KIND, doc, scope=cfg.scope, collector="partest-atlas/ui_flow")
+    try:
+        path = cfg.path_for(ui_flow.KIND)
+        doc = ui_flow.build(links)
+        artifacts.write(path, ui_flow.KIND, doc, scope=cfg.scope, collector="partest-atlas/ui_flow")
+    except Exception as exc:
+        # Как у двух других плагинов: файл не записан — строка с причиной, не INTERNALERROR.
+        try:
+            from partest.redact import redact_text  # noqa: PLC0415
+
+            reason = redact_text(f"{type(exc).__name__}: {exc}")
+        except Exception:  # pragma: no cover - partest — зависимость пакета
+            reason = type(exc).__name__
+        print(f"[atlas] ui_flow: {ui_flow.KIND} не записан ({reason})")
+        return
     s = doc["stats"]
     print(
         f"[atlas] ui_flow: связей {s['links']}, экранов {s['screens']}, "

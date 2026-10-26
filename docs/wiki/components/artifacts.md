@@ -139,12 +139,14 @@ atlas/<система>/<контур>/db_schema.json
 | Что | Как |
 |---|---|
 | строка — значение и ключ словаря | `redact_text` (`password=…`, `Bearer …`, `user:pw@host`) |
-| значение под секретным ключом (`password`, `token`, `api_key`, `client_secret`… — `partest.redact.DEFAULT_SENSITIVE_BODY_KEYS`, без учёта регистра и разделителей) | целиком `REDACTED` |
-| значение под ключом-идентификатором (`IDENTIFIER_KEYS`: `method`, `path`, `rawPath`, `table`, `schema`, `name`, `column`, `topic`, `service`) | как есть, вместе с вложенным: пришло из спецификации, каталога базы или брокера и связывает артефакты; `/users/{id}/password:reset` остаётся путём |
+| строка, список, словарь под секретным ключом (`is_secret_key`: после снятия регистра и разделителей — из `partest.redact.DEFAULT_SENSITIVE_BODY_KEYS`, оканчивается на `password`, `passwd`, `pwd`, `secret`, `token`, `apikey`, `cookie`, `session`, `dsn`, `credential(s)`, `privatekey` или содержит `password`) | целиком `REDACTED`; число под таким ключом — счётчик, остаётся |
+| **строка** под ключом-идентификатором (`IDENTIFIER_KEYS`: `method`, `path`, `rawPath`, `table`, `schema`, `name`, `column`, `topic`, `service`) без `=`, `;`, `@` и пробелов | как есть: пришла из спецификации, каталога базы или брокера и связывает артефакты; `/users/{id}/password:reset` остаётся путём |
+| строка под ключом-идентификатором с `=`, `;`, `@` или пробелом; список и словарь под ним | общим проходом: `/app;jsessionid=…` (matrix-параметры в `ui.flow.path`) и `found.table` из журналов (`relation "token=…"`) маскируются, бюджет считается |
 | `nodeid` | маскируется: параметры теста пишет тест |
 | ключи, совпавшие после маскировки | не сливаются: второй получает ` #2` |
 
-Значение по умолчанию колонки маскируется как строка; у колонки с секретным именем оно не
+Значение по умолчанию колонки маскируется как строка; у колонки с секретным именем (то же
+правило `is_secret_key`: `db_password`, `api_token`…) оно не
 пишется вовсе — только тип. Больше `REDACT_MAX_NODES` (500 000) узлов или глубже
 `REDACT_MAX_DEPTH` (64) — `PayloadTooLarge`, файл не пишется.
 

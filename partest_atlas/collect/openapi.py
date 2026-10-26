@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
@@ -98,21 +99,36 @@ def _body(op: dict, schemas: Dict[str, dict]) -> Optional[dict]:
     ref = raw.get("$ref")
     name = _text(ref).rsplit("/", 1)[-1] if isinstance(ref, str) else ""
     resolved = _dict(_deref(raw, schemas))
-    fields = [_text(f) for f in list(_dict(resolved.get("properties")))[:FIELDS_LIMIT]]
+    fields = [_text(f) for f in islice(_dict(resolved.get("properties")), FIELDS_LIMIT)]
     if not name and not fields:
         return None
     required = resolved.get("required")
     return {
         "schema": name or None,
         "required": bool(request_body.get("required")),
-        "requiredFields": sorted(_text(f) for f in (required if isinstance(required, list) else [])
-                                 if isinstance(f, str))[:FIELDS_LIMIT],
+        "requiredFields": sorted(_text(f) for f in islice(required if isinstance(required, list) else [],
+                                                          FIELDS_LIMIT) if isinstance(f, str)),
         "fields": fields,
     }
 
 
+def _params(raw: Any) -> List[Dict[str, Any]]:
+    """Параметры из списка — не больше :data:`PARAMS_LIMIT` элементов **до** разбора: список,
+    размноженный якорями, иначе перебирался бы целиком на каждой операции (112 КБ — 7 с)."""
+    items = raw if isinstance(raw, list) else []
+    return [
+        {"name": _text(p.get("name")), "in": _text(p.get("in")) or None,
+         "required": bool(p.get("required"))}
+        for p in islice(items, PARAMS_LIMIT)
+        if isinstance(p, dict) and p.get("name")
+    ]
+
+
 def parse(document: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Контракт → плоский список операций. Сети здесь нет."""
+    """Контракт → плоский список операций. Сети здесь нет.
+
+    Каждый список и словарь спецификации срезается **до** обхода (`islice`): стоимость
+    разбора линейна по числу операций, а не по тому, во что развернулись якоря YAML."""
     schemas = _dict(_dict(document.get("components")).get("schemas"))
     out: List[Dict[str, Any]] = []
     for path, item in _dict(document.get("paths")).items():
@@ -121,18 +137,12 @@ def parse(document: Dict[str, Any]) -> List[Dict[str, Any]]:
         path = path[:TEXT_LIMIT]
         # Параметры уровня пути принадлежат каждой операции под ним. Потерять их значит
         # объявить обязательный параметр необязательным.
-        shared = item.get("parameters") if isinstance(item.get("parameters"), list) else []
+        shared = _params(item.get("parameters"))  # один раз на путь, не на операцию
         for method in METHODS:
             op = item.get(method)
             if not isinstance(op, dict):
                 continue
-            own = op.get("parameters") if isinstance(op.get("parameters"), list) else []
-            params = [
-                {"name": _text(p.get("name")), "in": _text(p.get("in")) or None,
-                 "required": bool(p.get("required"))}
-                for p in [*shared, *own]
-                if isinstance(p, dict) and p.get("name")
-            ][:PARAMS_LIMIT]
+            params = (shared + _params(op.get("parameters")))[:PARAMS_LIMIT]
             tags = op.get("tags") if isinstance(op.get("tags"), list) else []
             operation_id = op.get("operationId")
             out.append(
@@ -141,7 +151,7 @@ def parse(document: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "path": norm_path(path),
                     "rawPath": path,
                     "operationId": _text(operation_id) if operation_id is not None else None,
-                    "tags": [t[:TEXT_LIMIT] for t in tags if isinstance(t, str)][:TAGS_LIMIT],
+                    "tags": [t[:TEXT_LIMIT] for t in islice(tags, TAGS_LIMIT) if isinstance(t, str)],
                     "deprecated": bool(op.get("deprecated")),
                     # Описаний тут может не быть ни одного. Поле остаётся: на другом
                     # проекте они есть, и код не должен узнавать об этом заново.
@@ -149,7 +159,8 @@ def parse(document: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "description": _text(op.get("description")),
                     "params": params,
                     "body": _body(op, schemas),
-                    "responses": sorted(_text(k) for k in _dict(op.get("responses")))[:RESPONSES_LIMIT],
+                    "responses": sorted(_text(k) for k in islice(_dict(op.get("responses")),
+                                                                 RESPONSES_LIMIT)),
                 }
             )
     return out
@@ -234,11 +245,11 @@ def source_of(service: str, kind: str, location: str) -> Dict[str, Any]:
     Адрес — через `partest.redact.redact_url`: без учётных данных, строки запроса и якоря,
     а при сомнении (сырые `/ ? #` в пароле) — `scheme://<redacted>`. Локальный путь
     пишется **как объявлен** в `confpartest.py`, а не разрешённым (полный путь на машине
-    сборки — чужой каталог пользователя), и через `redact_text`.
+    сборки — чужой каталог пользователя), и тоже через `redact_url`: «локальное» место бывает
+    адресом хранилища с подписью в строке запроса (`s3://b/s.yaml?X-Amz-Signature=…`).
     """
-    if kind == "url":
-        return {"service": service, "type": "url", "location": _redact_url(location)}
-    return {"service": service, "type": "local", "location": _redact_text(location)}
+    kind_shown = "url" if kind == "url" else "local"
+    return {"service": service, "type": kind_shown, "location": _redact_url(location)}
 
 
 @dataclass(frozen=True)

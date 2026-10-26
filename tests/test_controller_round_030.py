@@ -240,7 +240,10 @@ def test_8_identifiers_survive_redaction():
     out = artifacts.redact_payload(payload)
     assert out["operations"][0]["path"] == "/v1/users/{id}/password:reset"
     assert out["operations"][0]["rawPath"] == "/v1/users/{userId}/password:reset"
-    assert out["found"]["table"] == {"password=1": 1}
+    # Строка с `=` под ключом-идентификатором и словарь под ним — общим проходом
+    # (узкий раунд security): `service: token=x` и ключ `password=1` маскируются.
+    assert "x" not in out["operations"][0]["service"].replace("***", "")
+    assert out["found"]["table"] != {"password=1": 1}
 
 
 def test_8_nodeid_is_still_masked():

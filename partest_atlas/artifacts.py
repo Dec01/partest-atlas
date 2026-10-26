@@ -230,9 +230,11 @@ def _read_strict(path: Path) -> Any:
 
 #: Поля-идентификаторы: значения пришли из спецификации, каталога базы или брокера и
 #: связывают артефакты между собой. Маскировать их нельзя — `/users/{id}/password:reset`
-#: превращался в `password:***`, и путь контракта переставал совпадать с вызванным. Под
-#: таким ключом не трогается ничего, в том числе ключи вложенного словаря (`found.table` —
-#: имена таблиц). `nodeid` сюда не входит: его параметры пишет тест, и он маскируется.
+#: превращался в `password:***`, и путь контракта переставал совпадать с вызванным. Как
+#: есть остаётся только **строка** без `=`, `;`, `@` и пробелов (:func:`_keeps_identifier`);
+#: список и словарь под таким ключом (`found.table` из журналов) и строка с этими символами
+#: (`/app;jsessionid=…`) маскируются обычным образом. `nodeid` сюда не входит: его
+#: параметры пишет тест, и он маскируется.
 IDENTIFIER_KEYS = frozenset({
     "method", "path", "rawPath", "table", "schema", "name", "column", "topic", "service",
 })
@@ -253,10 +255,39 @@ def _secret_keys() -> frozenset:
     return frozenset(re.sub(r"[^a-z0-9]", "", k.lower()) for k in DEFAULT_SENSITIVE_BODY_KEYS)
 
 
+#: Окончания секретного ключа — по образцу `partest.redact` (окончания заголовков): после
+#: снятия регистра и разделителей `db_password`, `x-api-key`, `refreshToken`, `PG_DSN`,
+#: `aws_credentials` — секретные. Точного совпадения со списком мало: `db_password` его не
+#: давал.
+SECRET_KEY_ENDINGS = (
+    "password", "passwd", "pwd", "secret", "token", "apikey", "cookie", "session", "dsn",
+    "credential", "credentials", "privatekey",
+)
+
+
 def is_secret_key(key: Any) -> bool:
-    """Ключ из списка секретных (`partest.redact.DEFAULT_SENSITIVE_BODY_KEYS`): `password`,
-    `token`, `api_key`, `client_secret`… — без учёта регистра и разделителей (`apiKey`)."""
-    return isinstance(key, str) and re.sub(r"[^a-z0-9]", "", key.lower()) in _secret_keys()
+    """Секретный ли ключ. После снятия регистра и разделителей: есть в
+    `partest.redact.DEFAULT_SENSITIVE_BODY_KEYS`, оканчивается на одно из
+    :data:`SECRET_KEY_ENDINGS` или содержит `password` где угодно (`passwordHash`) — ложное
+    срабатывание здесь дешевле утечки."""
+    if not isinstance(key, str):
+        return False
+    norm = re.sub(r"[^a-z0-9]", "", key.lower())
+    if not norm:
+        return False
+    return norm in _secret_keys() or norm.endswith(SECRET_KEY_ENDINGS) or "password" in norm
+
+
+#: Символы, при которых строка под ключом-идентификатором всё же идёт в маскировку: в пути
+#: и имени таблицы их не бывает, а в `;jsessionid=…`, `relation "token=…"` и `user@host` —
+#: бывают.
+_UNSAFE_IDENTIFIER = re.compile(r"[=;@\s]")
+
+
+def _keeps_identifier(value: Any) -> bool:
+    """Строка под ключом-идентификатором остаётся как есть, только если в ней нет `=`, `;`,
+    `@` и пробельных символов."""
+    return isinstance(value, str) and _UNSAFE_IDENTIFIER.search(value) is None
 
 
 def redact_payload(value: Any) -> Any:
@@ -292,10 +323,15 @@ def redact_payload(value: Any) -> Any:
         if isinstance(item, Mapping):
             out: Dict[Any, Any] = {}
             for key, val in item.items():
-                if isinstance(key, str) and key in IDENTIFIER_KEYS:
+                if isinstance(key, str) and key in IDENTIFIER_KEYS and _keeps_identifier(val):
+                    # Только строка и только «чистая»: список или словарь под таким ключом
+                    # (`found.table` из журналов) идёт общим проходом — его ключи пришли из
+                    # чужого текста.
                     spend(depth + 1)
                     new_key, new_val = key, val
-                elif is_secret_key(key):
+                elif is_secret_key(key) and not isinstance(val, (bool, int, float)):
+                    # Число под секретным ключом — счётчик (`found.table.user_session: 3`), а
+                    # не секрет; строка, список, словарь — целиком.
                     new_key, new_val = key, (REDACTED if val not in (None, "") else val)
                 else:
                     new_key = redact_text(key) if isinstance(key, str) else key
@@ -527,7 +563,10 @@ def _started(record: Mapping[str, Any]) -> Optional[datetime]:
 def _link(record: Mapping[str, Any]) -> tuple:
     """Связь, которую запись описывает: тест, таблица или топик, фаза."""
     target = record.get("topic") if "topic" in record else (record.get("schema"), record.get("table"))
-    return (record.get("nodeid"), json.dumps(target, sort_keys=True, default=str), record.get("phase"))
+    # Каждое поле — сериализованной строкой: чужая запись с `{"nodeid": ["x"]}` иначе давала
+    # нехешируемый ключ и навсегда блокировала запись файла.
+    return tuple(json.dumps(part, sort_keys=True, default=str)
+                 for part in (record.get("nodeid"), target, record.get("phase")))
 
 
 def keep_last_runs(records: List[dict], keep_runs: int) -> List[dict]:
@@ -730,6 +769,7 @@ __all__ = [
     "IDENTIFIER_KEYS",
     "PayloadTooLarge",
     "inspect",
+    "SECRET_KEY_ENDINGS",
     "is_secret_key",
     "is_unc",
     "keep_last_runs",
