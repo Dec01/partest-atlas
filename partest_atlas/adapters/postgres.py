@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import importlib
 from contextlib import contextmanager
-from typing import Any, Iterator, List, Mapping, Optional
+from typing import Any, Dict, Iterator, List, Mapping, Optional
 
 from partest_atlas.config import env
 from partest_atlas.lang import t
@@ -66,6 +66,16 @@ class ConnectionNotConfigured(RuntimeError):
     """
 
 
+class ConnectionFailed(RuntimeError):
+    """База по строке подключения не ответила. Текст — без строки подключения: ошибка
+    драйвера цитирует её целиком, вместе с паролем, а сообщение уходит в журнал конвейера."""
+
+
+#: Сколько ждать соединения по `dsn_env`, если в строке подключения не сказано иначе. Без
+#: предела недоступный хост (VPN не поднят) держал бы команду минутами.
+DEFAULT_CONNECT_TIMEOUT_SEC = 10
+
+
 class NotReadOnly(RuntimeError):
     """База не подтвердила режим только чтения — опрашивать её сборщик не станет."""
 
@@ -89,15 +99,15 @@ def connect(section: Mapping[str, Any]) -> Iterator[Any]:
         module_name, _, attr = str(target).partition(":")
         if not attr:
             raise ConnectionNotConfigured(t(
-                f"database.connect={target!r}: ожидалось 'модуль:функция'",
-                f"database.connect={target!r}: expected 'module:function'",
+                "database.connect: ожидалось 'модуль:функция'",
+                "database.connect: expected 'module:function'",
             ))
         try:
             factory = getattr(importlib.import_module(module_name), attr)
         except Exception as exc:
             raise ConnectionNotConfigured(t(
-                f"database.connect={target!r} не импортируется: {exc}",
-                f"database.connect={target!r} cannot be imported: {exc}",
+                f"database.connect не импортируется ({type(exc).__name__})",
+                f"database.connect cannot be imported ({type(exc).__name__})",
             )) from exc
         with factory() as conn:
             yield conn
@@ -119,11 +129,43 @@ def connect(section: Mapping[str, Any]) -> Iterator[Any]:
             "dsn_env is set, but psycopg is not installed — install partest-atlas[postgres]",
         )) from exc
 
-    conn = psycopg.connect(dsn, row_factory=dict_row)
+    options: Dict[str, Any] = {"row_factory": dict_row}
+    if "connect_timeout" not in dsn:
+        options["connect_timeout"] = _timeout(section)
+    try:
+        conn = psycopg.connect(dsn, **options)
+    except Exception as exc:
+        # Текст ошибки psycopg цитирует строку подключения (`missing "=" after "…"`), а
+        # маскировка не знает всех её форм. Остаётся класс и то, что redact сочтёт
+        # безопасным; цепочки нет — трассировка напечатала бы исходный текст.
+        raise ConnectionFailed(t(
+            f"{dsn_env}: соединение не установлено ({type(exc).__name__}: "
+            f"{_safe_reason(exc, dsn)})",
+            f"{dsn_env}: no connection ({type(exc).__name__}: {_safe_reason(exc, dsn)})",
+        )) from None
     try:
         yield conn
     finally:
         conn.close()
+
+
+def _timeout(section: Mapping[str, Any]) -> int:
+    from partest_atlas.config import non_negative  # noqa: PLC0415
+
+    return int(non_negative(section, "connect_timeout", DEFAULT_CONNECT_TIMEOUT_SEC, int,
+                            where="database"))
+
+
+def _safe_reason(exc: BaseException, dsn: str) -> str:
+    """Текст ошибки драйвера без строки подключения: вырезается сама строка, остаток —
+    через `partest.redact.redact_text`."""
+    from partest.redact import redact_text  # noqa: PLC0415
+
+    text = " ".join(str(exc).split())
+    for piece in {dsn, dsn.strip()}:
+        if piece:
+            text = text.replace(piece, "<dsn>")
+    return redact_text(text)
 
 
 def _first_value(row: Any) -> Any:
@@ -150,16 +192,25 @@ def _end(conn: Any) -> None:
 def read_only(conn: Any) -> Iterator[Any]:
     """Блок транзакции только на чтение; на выходе — откат.
 
+    Откат на выходе откатывает и то, что соединение несло до нас, если проект отдал его с
+    открытой несохранённой транзакцией: в базу при этом ничего не пишется, но работа
+    проекта в этой транзакции теряется. Соединение для сборщика — отдельное соединение.
+
     Работает и в autocommit, и в обычном режиме драйвера, и на соединении, которое отдал
     проект (`database.connect`): режим выставляется SQL, а не свойством конкретного
     драйвера. Если база не подтвердила режим — :class:`NotReadOnly`, и ни одного запроса
     сборщика не выполнено.
     """
-    with conn.cursor() as cur:
-        cur.execute(BEGIN_READ_ONLY_SQL)
-        cur.execute(SET_READ_ONLY_SQL)
-        cur.execute(CHECK_READ_ONLY_SQL)
-        state = _first_value(cur.fetchone())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(BEGIN_READ_ONLY_SQL)
+            cur.execute(SET_READ_ONLY_SQL)
+            cur.execute(CHECK_READ_ONLY_SQL)
+            state = _first_value(cur.fetchone())
+    except BaseException:
+        # Блок мог уже открыться: оставлять его на соединении проекта нельзя.
+        _end(conn)
+        raise
     if str(state).strip().lower() != "on":
         _end(conn)
         raise NotReadOnly(t(
@@ -190,14 +241,16 @@ def schemas_from(section: Mapping[str, Any]) -> Optional[List[str]]:
             return None
         return list(raw)
     raise ValueError(t(
-        f"database.schemas={raw!r}: ожидался список схем или auto",
-        f"database.schemas={raw!r}: expected a list of schemas or auto",
+        "database.schemas: ожидался список схем или auto",
+        "database.schemas: expected a list of schemas or auto",
     ))
 
 
 def discover_schemas(conn: Any) -> List[str]:
     """Несистемные схемы, в которых есть таблицы или представления. Только чтение."""
+    from partest.sideeffects import assert_read_only_sql  # noqa: PLC0415
+
     with read_only(conn):
         with conn.cursor() as cur:
-            cur.execute(SCHEMAS_SQL)
+            cur.execute(assert_read_only_sql(SCHEMAS_SQL))
             return [str(_first_value(row)) for row in cur.fetchall()]

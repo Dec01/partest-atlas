@@ -177,5 +177,5 @@ def test_discover_schemas_reads_inside_a_read_only_transaction():
     assert conn.запросы[:3] == [
         postgres.BEGIN_READ_ONLY_SQL, postgres.SET_READ_ONLY_SQL, postgres.CHECK_READ_ONLY_SQL,
     ]
-    assert conn.запросы[3] == postgres.SCHEMAS_SQL
+    assert conn.запросы[3] == postgres.SCHEMAS_SQL.strip()  # прошёл assert_read_only_sql
     assert conn.запросы[-1] == postgres.END_SQL

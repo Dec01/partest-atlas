@@ -12,6 +12,24 @@ allow_version_literals: true
 Хронология: что сделано с документацией и почему. Новые записи сверху.
 Формат строки: дата · операция (ingest / update / lint / restructure) · что затронуто.
 
+## 2026-10-26 · update · код выхода `collect` и поправки к partest 2.8 (не выпущено)
+
+[[components/collect]], [[components/overview]], [[howto/prepare-a-project]] — `collect` на «не снято» отдаёт 1, 
+2 — только разбор аргументов ([[proposals]], L — решено). [[components/collect]] — грамматика из `partest.conf`, 
+локальный путь по правилу partest (сначала текущий каталог), честное описание 180 с: проверка между шагами, не общий предел.
+
+## 2026-10-26 · update · находки контролёров шага 1а (не выпущено)
+
+[[components/collect]] — загрузка у partest (`resolve_swagger`, потолки), импорт
+`confpartest.py` «не как в pytest» и сверка до импорта, несколько служб (`services`),
+правило имени области, неизвестные ключи и UNC, коды и вопрос о `1`, кодовая страница
+вывода, `exclude` по схеме, `connect_timeout`, `ConnectionFailed`, цена отката, язык —
+внутренний модуль. [[components/artifacts]] — правило имени области, маскировка при
+записи, `keep_runs`, поля `schema`, `services`. [[components/overview]] — коды `collect`,
+`ATLAS_DB_EFFECTS_ALL` всегда сессия, `keep_runs`, почему фазы выключены (таймер
+pytest-timeout), `schema` в `db.effects`. [[status]] — строка «Не выпущено», 737 проверок,
+связь с partest, линии 2 и 6. [[proposals]] — D (линии закрыты в коде), L–S.
+
 ## 2026-10-26 · update · набор формата от Вехи (не выпущено)
 
 [[components/artifacts]] — публичные имена `artifacts`, `collected_at`, ключи полезной

@@ -118,7 +118,7 @@ partest-atlas collect db-schema      # раздел database; schemas: auto — 
 partest-atlas collect container-logs # только при container_logs.source
 ```
 
-Неудача — одна строка в stderr и код 2, артефакт тогда не пишется. Что именно берётся и
+Неудача — одна строка в stderr и код 1, артефакт тогда не пишется. Что именно берётся и
 откуда — [[components/collect]].
 
 ## 6. Что появляется на диске

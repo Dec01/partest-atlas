@@ -156,21 +156,21 @@ def open_source(section: Mapping[str, Any]):
     module_name, _, attr = str(target).partition(":")
     if not attr:
         raise SourceNotConfigured(t(
-            f"container_logs.source={target!r}: ожидалось 'модуль:функция'",
-            f"container_logs.source={target!r}: expected 'module:function'",
+            "container_logs.source: ожидалось 'модуль:функция'",
+            "container_logs.source: expected 'module:function'",
         ))
     try:
         module = importlib.import_module(module_name)
     except Exception as exc:
         raise SourceNotConfigured(t(
-            f"container_logs.source={target!r} не импортируется: {exc}",
-            f"container_logs.source={target!r} cannot be imported: {exc}",
+            f"container_logs.source не импортируется ({type(exc).__name__})",
+            f"container_logs.source cannot be imported ({type(exc).__name__})",
         )) from exc
     factory = getattr(module, attr, None)
     if factory is None:
         raise SourceNotConfigured(t(
-            f"container_logs.source={target!r}: в {module_name} нет {attr!r}",
-            f"container_logs.source={target!r}: {module_name} has no {attr!r}",
+            "container_logs.source: в названном модуле такой функции нет",
+            "container_logs.source: the named module has no such function",
         ))
     return factory
 

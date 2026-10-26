@@ -14,20 +14,22 @@
 проверяется обычным тестом.
 
 Откуда документ, решает проект, а не пакет: :func:`load_from_confpartest` берёт его из
-`confpartest.swagger_files` — того же места, откуда покрытие считает partest. Файл или
-адрес, объявленный проектом, читается в окружении проекта; сам пакет никуда не ходит.
-В артефакт попадает, **откуда** взят документ (:func:`source_of`): адрес — без учётных
-данных, без строки запроса и через `partest.redact`.
+`confpartest.swagger_files` — того же места, откуда покрытие считает partest, — а загружает
+и разбирает его partest (`partest.openapi.resolve_swagger`): одна реализация на семейство.
+Файл или адрес, объявленный проектом, читается в окружении проекта; сам пакет никуда не
+ходит. В артефакт попадает, **откуда** взят документ (:func:`source_of`): адрес — через
+`partest.redact.redact_url`.
+
+Служб в `swagger_files` бывает несколько, а артефакт у области один: операции всех служб
+лежат вместе с ключом `service`, по службе — запись в `services` (:func:`assemble`).
 """
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
-from urllib.parse import unquote, urlsplit, urlunsplit
+from typing import Any, Dict, List, Mapping, Optional, Union
 
 from partest_atlas import artifacts
 from partest_atlas.artifacts import Scope
@@ -35,13 +37,6 @@ from partest_atlas.config import Config, load
 from partest_atlas.lang import t
 
 KIND = "contract.openapi"
-
-#: Виды источника в `swagger_files`, как их принимает partest (`validate_confpartest`).
-LOCAL_KINDS = ("local", "file", "path")
-URL_KIND = "url"
-
-#: Сколько ждать документ по адресу. Как у partest (`resolve_swagger`).
-FETCH_TIMEOUT_SEC = 60.0
 
 METHODS = ("get", "post", "put", "patch", "delete", "head", "options")
 
@@ -177,75 +172,122 @@ class SourceError(RuntimeError):
     """Спецификацию взять неоткуда или не удалось: сообщение уже без секретов."""
 
 
+#: Сколько ждать документ по адресу: на шаг (соединение, каждое чтение тела).
+FETCH_TIMEOUT_SEC = 60.0
+
+#: Предел, который `resolve_swagger` проверяет **между шагами** загрузки (между кусками
+#: тела). Это не общий предел времени: разрешение имени (DNS) и каждый отдельный шаг он не
+#: прерывает — шаг ограничен только :data:`FETCH_TIMEOUT_SEC`. Медленную отдачу он
+#: обрывает, зависший DNS — нет.
+FETCH_TOTAL_TIMEOUT_SEC = 180.0
+
+#: Сколько переадресаций идти. Адрес спецификации объявлен проектом, долгой цепочки у него
+#: не бывает; двадцать (умолчание httpx) — уже признак петли.
+MAX_REDIRECTS = 5
+
+
 def _redact_text(text: str) -> str:
     from partest.redact import redact_text  # noqa: PLC0415 — partest нужен только здесь
 
     return redact_text(text)
 
 
-def redact_url(url: str) -> str:
-    """Адрес для артефакта и сообщений: без `user:password@`, строки запроса и якоря.
+def _redact_url(url: str) -> str:
+    from partest.redact import redact_url  # noqa: PLC0415
 
-    Учётные данные и токены в адресе спецификации бывают (`?access_token=…`), а артефакт
-    читает чужая программа. Что осталось — ещё и через `partest.redact.redact_text`.
-    """
-    try:
-        parts = urlsplit(url)
-        netloc = parts.netloc.rpartition("@")[2]
-        clean = urlunsplit((parts.scheme, netloc, parts.path, "", ""))
-    except ValueError:
-        clean = url.split("?", 1)[0].split("#", 1)[0].rpartition("@")[2]
-    return _redact_text(clean)
+    return redact_url(url)
 
 
 def source_of(service: str, kind: str, location: str) -> Dict[str, Any]:
-    """Запись `source` артефакта: служба из `swagger_files`, вид и место — без секретов.
+    """Запись `source`: служба из `swagger_files`, вид и место — без секретов.
 
-    Локальный путь пишется **как объявлен** в `confpartest.py`, а не разрешённым: полный
-    путь на машине сборки — чужой каталог пользователя, карте он ничего не говорит.
+    Адрес — через `partest.redact.redact_url`: без учётных данных, строки запроса и якоря,
+    а при сомнении (сырые `/ ? #` в пароле) — `scheme://<redacted>`. Локальный путь
+    пишется **как объявлен** в `confpartest.py`, а не разрешённым (полный путь на машине
+    сборки — чужой каталог пользователя), и через `redact_text`.
     """
-    if kind == URL_KIND:
-        return {"service": service, "type": URL_KIND, "location": redact_url(location)}
+    if kind == "url":
+        return {"service": service, "type": "url", "location": _redact_url(location)}
     return {"service": service, "type": "local", "location": _redact_text(location)}
 
 
 @dataclass(frozen=True)
 class Loaded:
-    """Документ и то, откуда он взят."""
+    """Документ одной службы и то, откуда он взят."""
 
+    service: str
     document: Dict[str, Any]
     source: Dict[str, Any]
 
 
-def _parse_text(text: str, shown: str) -> Dict[str, Any]:
-    text = text.lstrip("\ufeff")
-    try:
-        data: Any = json.loads(text)
-    except ValueError:
-        try:
-            import yaml  # noqa: PLC0415
+def _confpartest(root: Union[str, Path]) -> Any:
+    """`confpartest.py` из *root* — и только он.
 
-            data = yaml.safe_load(text)
-        except Exception as exc:
+    `partest.load_confpartest` берёт модуль, уже импортированный, или первый найденный в
+    `sys.path`. Чужой `confpartest` с тем же именем выполнился бы, а его контракт лёг бы в
+    артефакт без единого предупреждения. Поэтому каталог проекта ставится в `sys.path`
+    первым, а найденный модуль сверяется с ожидаемым файлом **до** импорта.
+    """
+    import importlib.util  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    from partest import load_confpartest  # noqa: PLC0415 — partest нужен только здесь
+    from partest.conf import ConfpartestError  # noqa: PLC0415
+
+    base = Path(root).resolve()
+    expected = base / "confpartest.py"
+    if not expected.is_file():
+        raise SourceError(t(
+            f"в {base} нет confpartest.py — укажите его каталог ключом --root",
+            f"there is no confpartest.py in {base} — name its directory with --root",
+        ))
+    loaded = sys.modules.get("confpartest")
+    if loaded is not None:
+        origin = getattr(loaded, "__file__", None)
+        if not origin or Path(origin).resolve() != expected:
             raise SourceError(t(
-                f"{shown}: не JSON и не YAML — {type(exc).__name__}",
-                f"{shown}: neither JSON nor YAML — {type(exc).__name__}",
-            )) from None
-    if not isinstance(data, dict):
+                f"в процессе уже загружен другой confpartest ({origin}) — нужен {expected}",
+                f"another confpartest is already loaded in the process ({origin}) — "
+                f"{expected} is needed",
+            ))
+    else:
+        text = str(base)
+        while text in sys.path:
+            sys.path.remove(text)
+        sys.path.insert(0, text)
+        try:
+            spec = importlib.util.find_spec("confpartest")
+        except Exception:  # pragma: no cover - сломанный родительский пакет
+            spec = None
+        origin = getattr(spec, "origin", None)
+        if not origin or Path(origin).resolve() != expected:
+            raise SourceError(t(
+                f"под именем confpartest найден чужой файл ({origin}) вместо {expected} — "
+                "не импортирую",
+                f"the name confpartest resolves to a foreign file ({origin}) instead of "
+                f"{expected} — not importing it",
+            ))
+    try:
+        conf = load_confpartest(project_root=base)
+    except ConfpartestError as exc:
         raise SourceError(t(
-            f"{shown}: ожидался объект OpenAPI, получено {type(data).__name__}",
-            f"{shown}: expected an OpenAPI object, got {type(data).__name__}",
-        ))
-    if "openapi" not in data and "swagger" not in data:
+            f"confpartest.py не загружен из {base}: {_redact_text(str(exc))}",
+            f"confpartest.py was not loaded from {base}: {_redact_text(str(exc))}",
+        )) from None
+    origin = getattr(conf, "__file__", None)
+    if not origin or Path(origin).resolve() != expected:
         raise SourceError(t(
-            f"{shown}: не похоже на OpenAPI — нет ключа openapi или swagger",
-            f"{shown}: does not look like OpenAPI — no openapi or swagger key",
+            f"загружен не тот confpartest: {origin} вместо {expected}",
+            f"the wrong confpartest was loaded: {origin} instead of {expected}",
         ))
-    return data
+    return conf
 
 
-def _entries(conf: Any) -> Dict[str, Tuple[str, str]]:
-    """`swagger_files` в виде «служба → (вид, место)», с громкими ошибками формы."""
+def _entries(conf: Any) -> Dict[str, Any]:
+    """`swagger_files` — «служба → запись», разобранная грамматикой partest
+    (`partest.conf.parse_swagger_entry`): одно прочтение формы на семейство."""
+    from partest.conf import ConfpartestError, parse_swagger_entry  # noqa: PLC0415
+
     swagger = getattr(conf, "swagger_files", None)
     if not isinstance(swagger, Mapping) or not swagger:
         raise SourceError(t(
@@ -254,139 +296,171 @@ def _entries(conf: Any) -> Dict[str, Tuple[str, str]]:
             "confpartest.py has no swagger_files or it is empty — "
             "expected {'name': ['local'|'url', path_or_url]}",
         ))
-    out: Dict[str, Tuple[str, str]] = {}
+    out: Dict[str, Any] = {}
     for name, entry in swagger.items():
-        if not isinstance(entry, (list, tuple)) or len(entry) < 2:
-            raise SourceError(t(
-                f"swagger_files[{name!r}]: ожидалось [вид, путь_или_адрес]",
-                f"swagger_files[{name!r}]: expected [kind, path_or_url]",
-            ))
-        kind = str(entry[0]).strip().lower()
-        if kind not in (*LOCAL_KINDS, URL_KIND):
-            raise SourceError(t(
-                f"swagger_files[{name!r}]: вид {entry[0]!r} — ожидалось local или url",
-                f"swagger_files[{name!r}]: kind {entry[0]!r} — expected local or url",
-            ))
-        out[str(name)] = (kind, str(entry[1]))
+        shown = _redact_text(str(name))
+        try:
+            out[str(name)] = parse_swagger_entry(entry)
+        except ConfpartestError as exc:
+            # Сообщение partest места не цитирует; имя службы — через redact на всякий случай.
+            raise SourceError(f"swagger_files[{shown!r}]: {_redact_text(str(exc))}") from None
     return out
 
 
-def _fetch(location: str, shown: str) -> str:
-    """Документ по адресу — клиентом partest, под его политикой TLS."""
-    from partest import httpx_client  # noqa: PLC0415
-    from partest.tls import VERIFY_CONF_ATTR, VERIFY_ENV, is_certificate_error  # noqa: PLC0415
+def _local_place(location: str, base: Path) -> str:
+    """Где лежит локальная запись — по правилу partest: путь, который существует от текущего
+    каталога, берётся оттуда; иначе — от каталога `confpartest.py`. Абсолютный — как есть.
 
-    parts = urlsplit(location)
-    if parts.scheme not in ("http", "https"):
-        raise SourceError(t(
-            f"{shown}: адрес должен начинаться с http:// или https://",
-            f"{shown}: the URL must start with http:// or https://",
-        ))
-    auth = None
-    netloc = parts.netloc
-    if "@" in netloc:
-        # Учётные данные — в `auth=`, а не в адрес: адрес попадает в журналы httpx.
-        userinfo, netloc = netloc.rsplit("@", 1)
-        user, _, password = userinfo.partition(":")
-        auth = (unquote(user), unquote(password))
-    url = urlunsplit(parts._replace(netloc=netloc))
+    TODO(partest 2.8): заменить на публичную функцию partest, разрешающую относительное
+    место записи по этому правилу, когда она появится в дереве partest_client; это
+    единственная точка вызова.
+    """
+    path = Path(location)
+    if path.is_absolute() or path.exists():
+        return str(path.resolve())
+    return str((base / path).resolve())
+
+
+def _resolve(entry: Any, base: Path, shown: str) -> Dict[str, Any]:
+    """Документ записи — `partest.openapi.resolve_swagger` с потолками размера и времени."""
+    from partest.openapi import OpenApiResolveError, resolve_swagger  # noqa: PLC0415
+
+    location = entry.location if entry.kind == "url" else _local_place(entry.location, base)
     try:
-        with httpx_client(timeout=FETCH_TIMEOUT_SEC, follow_redirects=True) as client:
-            response = client.get(url, auth=auth)
-    except Exception as exc:
-        if is_certificate_error(exc):
-            raise SourceError(t(
-                f"{shown}: сертификат сервера не принят — доверенный CA или выключение "
-                f"проверки: {VERIFY_ENV} или confpartest.{VERIFY_CONF_ATTR}",
-                f"{shown}: the server certificate was not accepted — a trusted CA or "
-                f"turning verification off: {VERIFY_ENV} or confpartest.{VERIFY_CONF_ATTR}",
-            )) from None
-        # Текст исключения httpx может нести адрес целиком, со строкой запроса, — его не
-        # печатаем; имя класса говорит, что случилось: нет имени, нет маршрута, тайм-аут.
+        document = resolve_swagger(
+            (entry.kind, location),
+            project_root=base,
+            timeout=FETCH_TIMEOUT_SEC,
+            total_timeout=FETCH_TOTAL_TIMEOUT_SEC,
+            max_redirects=MAX_REDIRECTS,
+        )
+    except (OpenApiResolveError, OSError, ValueError) as exc:
+        # partest уже убрал из сообщения учётные данные и строку запроса; redact — вторым
+        # слоем. Путь к файлу в сообщении — машины сборки, в артефакт он не попадает.
         raise SourceError(t(
-            f"{shown}: не получен — {type(exc).__name__}",
-            f"{shown}: not fetched — {type(exc).__name__}",
+            f"{shown}: спецификация не получена — {_redact_text(str(exc))}",
+            f"{shown}: the specification was not obtained — {_redact_text(str(exc))}",
         )) from None
-    if response.status_code >= 400:
+    if not isinstance(document, dict) or ("openapi" not in document and "swagger" not in document):
         raise SourceError(t(
-            f"{shown}: сервер ответил {response.status_code}",
-            f"{shown}: the server answered {response.status_code}",
+            f"{shown}: не похоже на OpenAPI — нет ключа openapi или swagger",
+            f"{shown}: does not look like OpenAPI — no openapi or swagger key",
         ))
-    return response.text
+    return document
 
 
 def load_from_confpartest(
     root: Union[str, Path], *, service: Optional[str] = None
-) -> Loaded:
-    """Спецификация, объявленная в `confpartest.swagger_files` проекта в *root*.
+) -> List[Loaded]:
+    """Спецификации, объявленные в `confpartest.swagger_files` проекта в *root*.
 
-    `confpartest.py` загружает partest (`partest.load_confpartest`) — это **импорт кода
-    проекта**, как и при прогоне pytest. Локальный путь — от каталога `confpartest.py`,
-    адрес — клиентом partest под политикой TLS проекта (`tls_verify`).
+    Без *service* — все службы, в порядке объявления; с *service* — только она. Загрузка и
+    разбор — `partest.openapi.resolve_swagger` (под политикой TLS проекта, с потолком
+    размера, времени шага, времени между шагами и числа переадресаций). Любая неудача — :class:`SourceError` без секретов, и ни одна служба
+    тогда не возвращается: частичный контракт выглядел бы как полный.
 
-    Без *service* спецификация должна быть одна: выбрать первую из нескольких молча
-    значило бы снять не тот контракт и не сказать об этом.
+    Локальный относительный путь — по правилу partest: сначала от текущего каталога, затем
+    от каталога `confpartest.py` (:func:`_local_place`).
+
+    `confpartest.py` импортируется (это код проекта), но **не так, как при прогоне pytest**:
+    нет `conftest.py`, `pythonpath` из `pytest.ini`, `env =` из pytest-env и `.env`, который
+    подгружает conftest. Адрес, собранный из переменной окружения, берётся из окружения
+    этого вызова.
     """
-    from partest import load_confpartest  # noqa: PLC0415 — partest нужен только здесь
-
-    expected = (Path(root) / "confpartest.py").resolve()
-    if not expected.is_file():
-        raise SourceError(t(
-            f"в {Path(root)} нет confpartest.py — укажите каталог проекта ключом --root",
-            f"there is no confpartest.py in {Path(root)} — name the project directory with --root",
-        ))
-    try:
-        conf = load_confpartest(project_root=root)
-    except Exception as exc:
-        raise SourceError(t(
-            f"confpartest.py не загружен из {root}: {_redact_text(str(exc))}",
-            f"confpartest.py was not loaded from {root}: {_redact_text(str(exc))}",
-        )) from None
-    loaded_from = getattr(conf, "__file__", None)
-    if not loaded_from or Path(loaded_from).resolve() != expected:
-        # partest берёт `confpartest`, уже импортированный или первый найденный в `sys.path`;
-        # чужой модуль с тем же именем дал бы чужой контракт без единого предупреждения.
-        raise SourceError(t(
-            f"загружен не тот confpartest: {loaded_from} вместо {expected}",
-            f"the wrong confpartest was loaded: {loaded_from} instead of {expected}",
-        ))
-
+    conf = _confpartest(root)
+    base = Path(getattr(conf, "__file__")).resolve().parent
     entries = _entries(conf)
-    if service is None:
-        if len(entries) > 1:
-            raise SourceError(t(
-                f"в swagger_files несколько спецификаций ({', '.join(entries)}) — "
-                "выберите одну ключом --service",
-                f"swagger_files declares several specifications ({', '.join(entries)}) — "
-                "choose one with --service",
-            ))
-        service = next(iter(entries))
-    elif service not in entries:
+    if service is not None and service not in entries:
         raise SourceError(t(
-            f"службы {service!r} нет в swagger_files; есть: {', '.join(entries)}",
-            f"service {service!r} is not in swagger_files; known: {', '.join(entries)}",
+            f"службы {_redact_text(service)!r} нет в swagger_files; есть: "
+            f"{', '.join(_redact_text(n) for n in entries)}",
+            f"service {_redact_text(service)!r} is not in swagger_files; known: "
+            f"{', '.join(_redact_text(n) for n in entries)}",
         ))
+    names = [service] if service is not None else list(entries)
+    out: List[Loaded] = []
+    for name in names:
+        entry = entries[name]
+        source = source_of(name, entry.kind, entry.location)
+        document = _resolve(entry, base, f"{source['service']} ({source['location']})")
+        out.append(Loaded(name, document, source))
+    return out
 
-    kind, location = entries[service]
-    source = source_of(service, kind, location)
-    shown = source["location"]
-    if kind == URL_KIND:
-        return Loaded(_parse_text(_fetch(location, shown), shown), source)
 
-    path = Path(location)
-    if not path.is_absolute():
-        base = Path(getattr(conf, "__file__", None) or Path(root) / "confpartest.py").parent
-        path = base / path
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
+# --- несколько служб в одном артефакте ------------------------------------------------
+
+
+def _service_entry(loaded: Loaded) -> Dict[str, Any]:
+    operations = [{**op, "service": loaded.service} for op in parse(loaded.document)]
+    return {
+        "service": loaded.service,
+        "info": info_of(loaded.document),
+        "source": loaded.source,
+        "stats": summarize(operations),
+        "_operations": operations,
+    }
+
+
+def assemble(services: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Содержание артефакта из служб: операции всех служб с ключом `service`, `services`
+    — по записи на службу (`service`, `info`, `source`, `stats`), общая `stats`. `info` и
+    `source` верхнего уровня — только когда служба одна: у нескольких их нет, и читатель
+    берёт их из `services`."""
+    operations = [op for s in services for op in s["_operations"]]
+    payload: Dict[str, Any] = {
+        "operations": operations,
+        "stats": summarize(operations),
+        "services": [{k: v for k, v in s.items() if k != "_operations"} for s in services],
+    }
+    if len(services) == 1:
+        payload["info"] = services[0]["info"]
+        payload["source"] = services[0]["source"]
+    return payload
+
+
+def _kept_services(path: Path, scope: Scope, replaced: str, notes: List[str]) -> List[Dict[str, Any]]:
+    """Службы из прежнего артефакта, кроме *replaced* — чтобы `--service` обновлял свою, не
+    затирая остальные. Непонятый файл не даёт ничего (с заметкой); файл новее схемы — отказ:
+    переписать его значило бы потерять то, чего этот пакет не понимает."""
+    found = artifacts.inspect(path, KIND, scope=scope)
+    if found.state == artifacts.MISSING:
+        return []
+    if found.state == artifacts.NEWER:
         raise SourceError(t(
-            f"{shown}: файл спецификации не читается ({type(exc).__name__}) — путь берётся "
-            "от каталога confpartest.py",
-            f"{shown}: the specification file cannot be read ({type(exc).__name__}) — the "
-            "path is taken from the directory of confpartest.py",
-        )) from None
-    return Loaded(_parse_text(text, shown), source)
+            f"{path.name} записан схемой новее известной — не перезаписываю",
+            f"{path.name} was written by a newer schema — not overwriting it",
+        ))
+    if not found.usable:
+        notes.append(t(
+            f"прежний {path.name} не понят ({found.state}) — другие службы из него не сохранены",
+            f"the previous {path.name} was not understood ({found.state}) — other services "
+            "from it were not kept",
+        ))
+        return []
+    doc = found.doc
+    rows = doc.get("services")
+    if not isinstance(rows, list):
+        # Артефакт одной службы, снятый до `services`: служба — из `source.service`.
+        single = (doc.get("source") or {}).get("service") if isinstance(doc.get("source"), dict) else None
+        if not single:
+            if doc.get("operations"):
+                notes.append(t(
+                    f"в прежнем {path.name} операции без службы — заменены",
+                    f"operations in the previous {path.name} name no service — replaced",
+                ))
+            return []
+        rows = [{"service": single, "info": doc.get("info"), "source": doc.get("source"),
+                 "stats": doc.get("stats")}]
+        ops = [{**op, "service": single} for op in doc.get("operations") or [] if isinstance(op, dict)]
+    else:
+        ops = [op for op in doc.get("operations") or [] if isinstance(op, dict)]
+    kept = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("service") == replaced:
+            continue
+        name = row.get("service")
+        kept.append({**row, "_operations": [op for op in ops if op.get("service") == name]})
+    return kept
 
 
 def write(
@@ -395,21 +469,26 @@ def write(
     root: Optional[Union[str, Path]] = None,
     service: Optional[str] = None,
     scope: Optional[Scope] = None,
+    notes: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Взять спецификацию из `confpartest.py` и положить артефакт. Возвращает содержание.
+    """Взять спецификации из `confpartest.py` и положить артефакт. Возвращает содержание.
 
-    *root* — каталог с `confpartest.py`; по умолчанию — каталог `atlas.yaml` (или текущий,
-    если файла нет). *scope* — область, если не та, что в `ATLAS_SYSTEM`/`ATLAS_ENV`.
+    Без *service* — все службы `swagger_files`, артефакт пишется заново. С *service* —
+    только она: её операции и запись в `services` заменяются, остальные службы из прежнего
+    артефакта той же области сохраняются. *root* — каталог `confpartest.py`; по умолчанию —
+    каталог `atlas.yaml` (или текущий). *scope* — область, если не та, что в окружении.
+    *notes* — сюда дописываются заметки (прежний файл не понят и т. п.).
     """
     cfg = config or load()
     where = scope or cfg.scope
-    loaded = load_from_confpartest(root or cfg.root, service=service)
-    payload = build(loaded.document, source=loaded.source)
-    artifacts.write(
-        where.path(cfg.artifacts_dir, KIND),
-        KIND,
-        payload,
-        scope=where,
-        collector="partest-atlas/openapi",
-    )
+    path = where.path(cfg.artifacts_dir, KIND)
+    sink: List[str] = notes if notes is not None else []
+    fresh = [_service_entry(x) for x in load_from_confpartest(root or cfg.root, service=service)]
+    if service is None:
+        services = fresh
+    else:
+        kept = _kept_services(path, where, service, sink)
+        services = kept + fresh
+    payload = assemble(services)
+    artifacts.write(path, KIND, payload, scope=where, collector="partest-atlas/openapi")
     return payload

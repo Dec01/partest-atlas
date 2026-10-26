@@ -31,9 +31,11 @@ from partest_atlas.lang import t
 #: «проверка нашла» и «проверка не состоялась» нельзя сводить к одному числу.
 EXIT_PROBLEMS = 2
 
-#: Код возврата `collect`, когда снять не удалось: одна строка в stderr и `2`, как у
-#: разбора аргументов. Артефакт в этом случае не пишется и прежний не трогается.
-EXIT_COLLECT_FAILED = 2
+#: Код возврата `collect`, когда снять не удалось: одна строка в stderr и `1` — «команда не
+#: состоялась», то же правило, что у `check` и `show`. Артефакт в этом случае не пишется и
+#: прежний не трогается. `2` у `collect` — только ошибка разбора аргументов (argparse):
+#: опечатку в ключе нельзя путать с недоступной базой (решение 2026-10-26, proposals L).
+EXIT_COLLECT_FAILED = 1
 
 COMMANDS = ("check", "show", "wrap", "collect")
 
@@ -193,38 +195,45 @@ class _Refused(ValueError):
 
 
 def _scope_part(value: Optional[str], env_name: str, flag: str) -> str:
-    """Часть области — из ключа, иначе из окружения. Это имя каталога, а не путь: `..` или
-    разделитель вывели бы запись за пределы каталога артефактов."""
+    """Часть области — из ключа, иначе из окружения. Правило имени — у владельца формата
+    (:func:`partest_atlas.artifacts.valid_scope_part`), то же, что у читающей программы:
+    иначе артефакт лёг бы туда, где его никто не покажет. Значение в отказе не
+    печатается — оно из чужого окружения."""
     import os  # noqa: PLC0415
 
     raw = value if value is not None else (os.getenv(env_name) or DEFAULT_SCOPE_KEY)
-    if not raw or raw in {".", ".."} or any(c in raw for c in "/\\:") or raw != raw.strip():
-        raise _Refused(t(
-            f"{flag} / {env_name}={raw!r}: ожидалось имя каталога без разделителей и `..`",
-            f"{flag} / {env_name}={raw!r}: expected a directory name without separators or `..`",
-        ))
+    if not artifacts.valid_scope_part(raw):
+        source = flag if value is not None else env_name
+        raise _Refused(t(f"{source}: {artifacts.SCOPE_RULE_RU}", f"{source}: {artifacts.SCOPE_RULE_EN}"))
     return raw
 
 
 def _project_on_path(root: Path) -> None:
-    """Каталог проекта — в начало `sys.path`: `database.connect` и `container_logs.source`
-    называют модули проекта, а у установленной команды текущего каталога в пути нет."""
+    """Каталог проекта — **первым** в `sys.path`: `database.connect` и
+    `container_logs.source` называют модули проекта, а у установленной команды текущего
+    каталога в пути нет. Если каталог уже стоял в пути не первым, модуль с тем же именем
+    из более раннего каталога затенил бы модуль проекта — поэтому он переносится вперёд."""
     text = str(root)
-    if text not in sys.path:
-        sys.path.insert(0, text)
+    while text in sys.path:
+        sys.path.remove(text)
+    sys.path.insert(0, text)
 
 
 def _one_line(exc: BaseException) -> str:
     """Сообщение исключения одной строкой и через `partest.redact`: в тексте ошибки
     драйвера бывают адрес и имя пользователя, а stderr уходит в журнал конвейера."""
-    from partest_atlas.adapters.postgres import ConnectionNotConfigured, NotReadOnly  # noqa: PLC0415
+    from partest_atlas.adapters.postgres import (  # noqa: PLC0415
+        ConnectionFailed,
+        ConnectionNotConfigured,
+        NotReadOnly,
+    )
     from partest_atlas.collect.container_logs import SourceNotConfigured  # noqa: PLC0415
     from partest_atlas.collect.db_schema import NoTables  # noqa: PLC0415
     from partest_atlas.collect.openapi import SourceError  # noqa: PLC0415
     from partest_atlas.config import ConfigError  # noqa: PLC0415
 
-    own = (_Refused, ConnectionNotConfigured, NotReadOnly, SourceNotConfigured, NoTables,
-           SourceError, ConfigError, ValueError)
+    own = (_Refused, ConnectionNotConfigured, ConnectionFailed, NotReadOnly, SourceNotConfigured,
+           NoTables, SourceError, ConfigError, ValueError)
     text = " ".join(str(exc).split()) or type(exc).__name__
     if not isinstance(exc, own):
         text = f"{type(exc).__name__}: {text}"
@@ -235,8 +244,29 @@ def _one_line(exc: BaseException) -> str:
     return redact_text(text)
 
 
+#: Управляющие символы (C0, DEL, C1) — то, что в строке из чужой спецификации может
+#: переписать терминал или журнал (ESC-последовательности).
+_CONTROL = {c: "?" for c in [*range(0x00, 0x20), *range(0x7F, 0xA0)]}
+
+
+def _printable(text: Any) -> str:
+    return str(text).translate(_CONTROL)
+
+
 def _summary(what: str, payload: Dict[str, Any]) -> str:
+    return _printable(_summary_text(what, payload))
+
+
+def _summary_text(what: str, payload: Dict[str, Any]) -> str:
     stats = payload.get("stats") or {}
+    if what == "openapi" and len(payload.get("services") or []) > 1:
+        names = ", ".join(str(s.get("service")) for s in payload["services"])
+        return t(
+            f"операций {stats.get('operations')}, путей {stats.get('paths')} · "
+            f"служб {len(payload['services'])}: {names}",
+            f"operations {stats.get('operations')}, paths {stats.get('paths')} · "
+            f"services {len(payload['services'])}: {names}",
+        )
     if what == "openapi":
         info = payload.get("info") or {}
         source = payload.get("source") or {}
@@ -285,14 +315,22 @@ def _cmd_collect(args: argparse.Namespace, *, as_json: bool) -> int:
             system=_scope_part(args.system, "ATLAS_SYSTEM", "--system"),
             env=_scope_part(args.env, "ATLAS_ENV", "--env"),
         )
+        for key in cfg.unknown_keys():
+            # Договор `atlas-config`: неизвестный ключ своего раздела называется. Сбор не
+            # останавливается — опечатка оставила бы умолчание, но не испортила бы запись.
+            print(t(f"[atlas] atlas.yaml: неизвестный ключ {key} — не читается",
+                    f"[atlas] atlas.yaml: unknown key {key} — not read"), file=sys.stderr)
+        notes: List[str] = []
         if args.what == "openapi":
-            payload = openapi.write(cfg, root=root, service=args.service, scope=scope)
+            payload = openapi.write(cfg, root=root, service=args.service, scope=scope, notes=notes)
         else:
             _project_on_path(cfg.root)
             payload = module.write(cfg, scope=scope)
     except Exception as exc:
         print(f"partest-atlas collect {args.what}: {_one_line(exc)}", file=sys.stderr)
         return EXIT_COLLECT_FAILED
+    for note in notes:
+        print(f"[atlas] collect {args.what}: {_printable(note)}", file=sys.stderr)
 
     path = scope.path(cfg.artifacts_dir, module.KIND)
     if as_json:
@@ -304,6 +342,8 @@ def _cmd_collect(args: argparse.Namespace, *, as_json: bool) -> int:
                 "stats": payload.get("stats"),
                 **({"info": payload["info"]} if "info" in payload else {}),
                 **({"source": payload["source"]} if "source" in payload else {}),
+                **({"services": [s.get("service") for s in payload["services"]]}
+                   if "services" in payload else {}),
             },
             ensure_ascii=False,
             indent=1,
@@ -396,48 +436,66 @@ def _parser() -> argparse.ArgumentParser:
                "collect an observation that needs no test run and write the artifact"),
         description=t(
             "Пишет только в <artifacts_dir>/<система>/<контур>/. Неудача — одна строка в "
-            "stderr и код 2; артефакт тогда не пишется.",
+            "stderr и код 1; артефакт тогда не пишется.",
             "Writes only to <artifacts_dir>/<system>/<env>/. A failure is one line on "
-            "stderr and exit code 2; no artifact is written then.",
+            "stderr and exit code 1; no artifact is written then.",
         ),
     )
     what = p_collect.add_subparsers(dest="what", required=True)
     p_openapi = what.add_parser(
         "openapi",
         parents=[common],
-        help=t("контракт из confpartest.swagger_files → contract.openapi",
+        help=t("контракт из confpartest.swagger_files -> contract.openapi",
                "the contract from confpartest.swagger_files -> contract.openapi"),
         description=t(
-            "Источник — confpartest.swagger_files проекта: локальный путь — от каталога "
-            "confpartest.py, адрес — клиентом partest под его политикой TLS. confpartest.py "
-            "импортируется, как при прогоне pytest.",
+            "Источник — confpartest.swagger_files проекта: локальный путь — от текущего "
+            "каталога, иначе от каталога confpartest.py, адрес — partest под его политикой TLS. Без --service — все "
+            "службы; с --service — только она, остальные в артефакте сохраняются. "
+            "confpartest.py импортируется, но не так, как при прогоне pytest: без conftest.py, "
+            "pythonpath из pytest.ini, env из pytest-env и .env.",
             "The source is the project's confpartest.swagger_files: a local path is taken "
-            "from the directory of confpartest.py, a URL is fetched with partest's client "
-            "under its TLS policy. confpartest.py is imported, as in a pytest run.",
+            "from the current directory, else from the directory of confpartest.py, a URL is fetched by partest under its TLS "
+            "policy. Without --service — every service; with --service — that one only, the "
+            "others in the artifact are kept. confpartest.py is imported, but not as in a "
+            "pytest run: no conftest.py, pythonpath from pytest.ini, env from pytest-env or .env.",
         ),
     )
     p_openapi.add_argument(
         "--service",
-        help=t("ключ в swagger_files; обязателен, если спецификаций несколько",
-               "key in swagger_files; required when there are several specifications"),
+        help=t("ключ в swagger_files: обновить только эту службу",
+               "key in swagger_files: update this service only"),
     )
     what.add_parser(
         "db-schema",
         parents=[common],
-        help=t("схема базы из раздела database → db.schema (только чтение)",
+        help=t("схема базы из раздела database -> db.schema (только чтение)",
                "the database schema from the database section -> db.schema (read-only)"),
     )
     what.add_parser(
         "container-logs",
         parents=[common],
-        help=t("связи из журналов контейнеров → containers.logs; нужен container_logs.source",
+        help=t("связи из журналов контейнеров -> containers.logs; нужен container_logs.source",
                "links from container logs -> containers.logs; needs container_logs.source"),
     )
     return parser
 
 
+def _tolerant_stdout() -> None:
+    """Вывод в перенаправленный поток на Windows идёт в кодовой странице ANSI, и знак,
+    которого в ней нет (кириллица под `--lang en` на cp1252), ронял команду **после**
+    записи артефакта. Неотображаемое — экранируется, как у stderr по умолчанию."""
+    for stream in (sys.stdout,):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(errors="backslashreplace")
+            except Exception:  # pragma: no cover - чужой поток (pytest capture и т. п.)
+                pass
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     raw = list(argv) if argv is not None else sys.argv[1:]
+    _tolerant_stdout()
     previous = lang.current()
     # Язык — на время вызова: код, который зовёт функции пакета сам, получает прежний.
     lang.set_lang(_pre_lang(raw) or lang.detect())

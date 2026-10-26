@@ -8,7 +8,9 @@
 Режим выбирается сам, и это не удобство, а необходимость. Снимок вокруг каждого теста
 требует выдержки в секунды (см. `collect.db_effects`), и на полном прогоне это часы.
 Поэтому: тестов под замером немного — режим ``test``, каждому тесту своя дельта; тестов
-много — режим ``session``, один снимок на весь прогон.
+много — режим ``session``, один снимок на весь прогон. ``ATLAS_DB_EFFECTS_ALL=1`` — всегда
+``session``: дельта всего прогона, сколько бы тестов ни было. Ни одного теста под замером —
+замера нет вовсе (ниже).
 
 Окно теста в режиме ``test`` — весь его протокол: подготовка, вызов и уборка. Данные,
 которые тест создаёт фикстурой, — тоже его эффект, и без подготовки окно их теряло бы.
@@ -70,6 +72,11 @@ from partest_atlas.config import Config, load, non_negative
 
 ENABLE_ENV = "ATLAS_DB_EFFECTS"
 ALL_ENV = "ATLAS_DB_EFFECTS_ALL"
+
+#: Сколько последних прогонов держать в `db_effects.json` (`db_effects.keep_runs`; `0` — все).
+#: С меткой прогона записи разных прогонов не схлопываются, и без предела файл рос бы с
+#: каждым прогоном.
+DEFAULT_KEEP_RUNS = 20
 MARKER = "db_effects"
 
 #: Сколько тестов под замером ещё имеет смысл мерить поштучно. Выше — режим сессии.
@@ -84,25 +91,44 @@ def _on() -> bool:
 
 def _wanted(nodeid: str, marked: bool) -> bool:
     """Тест под замером: помечен маркером, подошёл под маску, или мерим всех."""
-    if (os.getenv(ALL_ENV) or "").strip().lower() in {"1", "true", "yes", "on"}:
+    if _all():
         return True
     if marked:
         return True
     return any(fnmatch.fnmatch(nodeid, pat) for pat in _state.get("include") or [])
 
 
+def _all() -> bool:
+    return (os.getenv(ALL_ENV) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def choose_mode(selected: int, limit: int) -> str:
-    """Режим по числу тестов под замером. Ноль — тоже `session`: мерить нечего поштучно,
-    но общая дельта прогона всё равно осмысленна."""
+    """Режим по числу тестов под замером — только правило: при нуле плагин соединения не
+    открывает вовсе (:func:`pytest_collection_finish`), что бы правило ни вернуло.
+    ``ATLAS_DB_EFFECTS_ALL=1`` — всегда ``session``: «мерить всё» — дельта прогона, а не
+    поштучные выдержки по 13 секунд на каждый тест маленького набора."""
+    if _all():
+        return db_effects.SESSION
     return db_effects.TEST if 0 < selected <= limit else db_effects.SESSION
 
 
 def _note(reason: str, *, misconfigured: bool = False) -> None:
+    # Текст исключений источника бывает с адресом, пользователем и строкой подключения, а
+    # вывод прогона уходит в журнал конвейера: через `partest.redact` (proposals D).
+    reason = _redacted(reason)
     _state["note"] = reason
     if misconfigured:
         print(f"[atlas] db_effects ВЫКЛЮЧЕН ОШИБКОЙ КОНФИГУРАЦИИ — чинить здесь: {reason}")
     else:
         print(f"[atlas] db_effects выключен: {reason}")
+
+
+def _redacted(text: str) -> str:
+    try:
+        from partest.redact import redact_text  # noqa: PLC0415 — только когда включены
+    except Exception:  # pragma: no cover - partest — зависимость пакета
+        return text
+    return redact_text(text)
 
 
 def _active() -> bool:
@@ -140,7 +166,13 @@ def pytest_configure(config) -> None:
         settle = _number(section, "settle_sec", db_effects.DEFAULT_SETTLE_SEC, float)
         phases = section.get("phases", False)
         if not isinstance(phases, bool):
-            raise ValueError(f"{MARKER}.phases={phases!r}: ожидалось true или false")
+            raise ValueError(f"{MARKER}.phases: ожидалось true или false")
+        keep_runs = _number(section, "keep_runs", DEFAULT_KEEP_RUNS, int)
+        # Область — сейчас, а не при записи в конце прогона: негодное имя в ATLAS_SYSTEM
+        # иначе стало бы INTERNALERROR после всех тестов.
+        cfg.scope  # noqa: B018
+        for key in cfg.unknown_keys():
+            print(f"[atlas] atlas.yaml: неизвестный ключ {key} — не читается")
         limit = _number(section, "per_test_limit", DEFAULT_PER_TEST_LIMIT, int)
         database = cfg.section("database")
         # `None` — `schemas: auto`: какие схемы, узнаём у базы, когда соединение откроется.
@@ -159,6 +191,7 @@ def pytest_configure(config) -> None:
         limit=limit,
         records=[],
         phases=phases,
+        keep_runs=keep_runs,
         run=artifacts.run_label(),
         selected=0,
         mode=db_effects.SESSION,
@@ -193,7 +226,8 @@ def pytest_collection_finish(session) -> None:
         return
     if not wanted:
         _state["idle"] = True
-        print("[atlas] db_effects: ни один тест не выбран под замер — соединение не открывается")
+        print("[atlas] db_effects: ни один тест не выбран под замер — соединение не открывается; "
+              "дельта всего прогона без маркеров — ATLAS_DB_EFFECTS_ALL=1")
         return
     if _state["mode"] == db_effects.SESSION:
         _open_session_probe()
@@ -406,6 +440,7 @@ def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ARG001
         records,
         scope=cfg.scope,
         collector="partest-atlas/db_effects",
+        keep_runs=_state.get("keep_runs", DEFAULT_KEEP_RUNS),
     )
     tables = {r["table"] for r in records}
     print(

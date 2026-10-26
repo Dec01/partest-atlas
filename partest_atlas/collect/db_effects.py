@@ -38,12 +38,21 @@ from partest_atlas.adapters.postgres import read_only
 
 KIND = "db.effects"
 
+#: Схема — в выборке и в ключе снимка: одноимённые таблицы двух схем иначе затирали бы
+#: друг друга, и в снимках «до» и «после» могла победить разная — дельта из чужих счётчиков.
 STATS_SQL = """
-SELECT relname AS table_name,
+SELECT schemaname AS table_schema, relname AS table_name,
        n_tup_ins AS ins, n_tup_upd AS upd, n_tup_del AS del
   FROM pg_stat_user_tables
  WHERE schemaname = ANY(%(schemas)s)
+ ORDER BY schemaname, relname
 """
+
+
+def snapshot_key(row: Mapping[str, Any]) -> str:
+    """Ключ таблицы в снимке: `схема.имя`; строка без схемы (снятая по-старому) — имя."""
+    schema = row.get("table_schema")
+    return f"{schema}.{row['table_name']}" if schema else str(row["table_name"])
 
 ACTIVE_SESSIONS_SQL = """
 SELECT count(*) AS n FROM pg_stat_activity
@@ -94,13 +103,15 @@ def diff(
         record: Dict[str, Any] = {
             "test": test,
             "nodeid": nodeid,
-            "table": table,
+            "table": str(now.get("table_name") or table),
             "insert": inserted,
             "update": updated,
             "delete": deleted,
             "shared": shared,
             "scope": scope,
         }
+        if now.get("table_schema"):
+            record["schema"] = now["table_schema"]
         if run is not None:
             record["run"] = dict(run)
         if phase is not None:
@@ -143,7 +154,7 @@ class DbEffects:
         with read_only(self.conn), self.conn.cursor() as cur:
             cur.execute("SELECT pg_stat_clear_snapshot()")
             cur.execute(STATS_SQL, {"schemas": self.schemas})
-            rows = {r["table_name"]: r for r in cur.fetchall()}
+            rows = {snapshot_key(r): r for r in cur.fetchall()}
         self._rollback()
         return rows
 

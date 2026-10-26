@@ -14,8 +14,10 @@ audience: agent
 
 Имена модуля `partest_atlas.artifacts` из `__all__` — тоже контракт: `KINDS`,
 `PAYLOAD_KEYS`, `SCHEMA_VERSION`, `STATES`, `RUN_ID_ENV`, `DEFAULT_SCOPE_KEY`, `Scope`,
-`Inspection`, `read`, `write`, `append_records`, `validate`, `inspect`, `discover_scopes`,
-`scope_of`, `kind_of`, `filename`, `run_label`. Меняются только с записью в `CHANGELOG.md`.
+`SCOPE_RULE_RU`/`SCOPE_RULE_EN`, `valid_scope_part`, `Inspection`, `read`, `write`,
+`append_records`, `keep_last_runs`, `redact_payload`, `validate`, `inspect`,
+`discover_scopes`, `scope_of`, `kind_of`, `filename`, `run_label`. Меняются только с записью
+в `CHANGELOG.md`.
 
 ## Заголовок файла
 
@@ -71,6 +73,8 @@ audience: agent
 
 Аддитивные поля схемы 2, появившиеся без смены версии (`CHANGELOG.md`, Unreleased):
 
+- `db.effects` — `schema` рядом с `table`: таблица — пара (схема, имя).
+- `db.schema` — `schema` у цели внешнего ключа (`fk`).
 - `db.effects`, `bus.flow` — `run: {id, startedAt}` в каждой записи: метка прогона
   (`run_label()`: `ATLAS_RUN_ID`, если задан, иначе случайная; одна на процесс). У
   `db.effects` в режиме `test` с `db_effects.phases: true` — ещё `phase`:
@@ -78,7 +82,8 @@ audience: agent
 - `containers.logs` — `logs: [{name, read, lines}]` и `stats.read`/`unread`/`lines`:
   «журнал не прочитан» (`read: false`) отличим от «прочитан, связей нет». `containers` —
   по-прежнему только контейнеры с находками.
-- `contract.openapi` — `info`, `source` ([[components/collect]]).
+- `contract.openapi` — `info`, `source`, `services`, `service` у операции
+  ([[components/collect]], «Несколько служб»).
 - `ui.flow` — `screen` нормализован: `#/orders/42?tab=1` → `/#/orders/{id}`.
 
 Что внутри `runner.history` и что значит срез покрытия в его записях — [[components/history]].
@@ -101,6 +106,12 @@ atlas/<система>/<контур>/db_schema.json
 
 `Scope.from_env()` берёт `ATLAS_SYSTEM` и `ATLAS_ENV`; пустое значение равно умолчанию.
 
+**Имя области — имя каталога, и правило его здесь** (`valid_scope_part`, договор
+`atlas-config`): латиница, цифры, `.`, `_`, `-`; не `.`, не `..` и без `..` внутри — то же,
+что у читающей программы. `Scope(...)` с другим именем — `ValueError`; `Scope.from_env()` —
+`ValueError` с именем переменной, без значения. `validate` называет негодную область в
+файле, `discover_scopes` и `scope_of` такие каталоги пропускают.
+
 **Область в файле обязана совпадать с каталогом.** `validate(doc, scope=…)`, `inspect` и
 `partest-atlas check` сверяют их: файл, перенесённый в каталог другого контура, —
 расхождение, а не годные данные. `scope_of(path)` — область по раскладке
@@ -114,8 +125,16 @@ atlas/<система>/<контур>/db_schema.json
 идёт в несколько процессов, и параллельный воркер не должен увидеть полузаписанный JSON,
 а прерванный прогон не должен оставить битый артефакт.
 
+**Маскировка при записи.** `write()` прогоняет каждую строку полезной нагрузки — значения и
+ключи — через `partest.redact.redact_text` (`redact_payload`): всё, что попадает в артефакт,
+проходит `partest.redact`. Имена таблиц, путей и топиков она не меняет; меняет то, что
+выглядит секретом (`password=…`, `Bearer …`, `user:pw@host`) — в описаниях спецификации,
+значениях по умолчанию колонок, находках в журналах, `nodeid`.
+
 `append_records()` дописывает записи в артефакт-список, схлопывая точные повторы по
-сериализованной подписи. Существующее содержимое берётся, **только если совпал вид**: иначе
+сериализованной подписи (новые записи маскируются до сравнения). `keep_runs` больше нуля —
+остаются записи последних стольких прогонов по `run.startedAt` (`keep_last_runs`;
+сравнивается время с поясом, а не текст; записи без метки уходят первыми). Существующее содержимое берётся, **только если совпал вид**: иначе
 файл от другого сборщика молча слился бы с новым.
 
 Дописывание — чтение, слияние и атомарная замена **без блокировки**. Полузаписанный файл

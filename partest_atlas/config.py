@@ -25,7 +25,7 @@ import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from partest_atlas.artifacts import Scope
 from partest_atlas.lang import t
@@ -35,6 +35,7 @@ __all__ = [
     "DEFAULT_ARTIFACTS_DIR",
     "Config",
     "ConfigError",
+    "KNOWN_KEYS",
     "env",
     "find",
     "load",
@@ -45,6 +46,26 @@ CONFIG_NAME = "atlas.yaml"
 
 #: Куда складывать артефакты, если в файле не сказано иначе.
 DEFAULT_ARTIFACTS_DIR = "atlas"
+
+#: Разделы, которыми владеет этот пакет, и ключи, которые он в них читает (договор
+#: `atlas-config`). Неизвестный ключ своего раздела — называется (:meth:`Config.unknown_keys`):
+#: опечатка `schemaz:` иначе молча оставила бы умолчание. Чужие разделы (`reports`,
+#: `runner`… — сервер карты) не отвергаются и не проверяются: они не наши.
+KNOWN_KEYS: Dict[str, frozenset] = {
+    "project": frozenset({"name", "api_prefix"}),
+    "database": frozenset({"connect", "dsn_env", "schemas", "key", "label", "exclude",
+                           "count_rows", "connect_timeout"}),
+    "container_logs": frozenset({"source", "rules"}),
+    "db_effects": frozenset({"settle_sec", "per_test_limit", "include", "phases", "keep_runs"}),
+    "bus_flow": frozenset({"reader", "configured", "include", "settle_sec", "keep_runs"}),
+    "ui_flow": frozenset({"window_ms", "ignore_url", "ignore_control"}),
+}
+
+
+def _is_unc(text: str) -> bool:
+    """Путь UNC (`\\\\сервер\\ресурс`, `//сервер/ресурс`): общий ресурс сети. Договор
+    `atlas-config` их не принимает — запись в чужой ресурс не своя папка артефактов."""
+    return text.startswith(("\\\\", "//"))
 
 
 class ConfigError(RuntimeError):
@@ -69,9 +90,26 @@ class Config:
 
     @property
     def artifacts_dir(self) -> Path:
+        """Каталог артефактов: относительный — от каталога `atlas.yaml`, абсолютный — как
+        есть, UNC — :class:`ConfigError` (значение не показывается)."""
         raw = self.raw.get("artifacts_dir") or DEFAULT_ARTIFACTS_DIR
+        if not isinstance(raw, str):
+            raise ConfigError(t("artifacts_dir: ожидался путь строкой",
+                                "artifacts_dir: expected a path as a string"))
+        if _is_unc(raw.strip()):
+            raise ConfigError(t("artifacts_dir: пути UNC (общий ресурс сети) не принимаются",
+                                "artifacts_dir: UNC paths (network shares) are not accepted"))
         path = Path(raw)
         return path if path.is_absolute() else self.root / path
+
+    def unknown_keys(self) -> List[str]:
+        """Ключи своих разделов, которых пакет не читает: ``["database.schemaz", …]``."""
+        out: List[str] = []
+        for name, known in KNOWN_KEYS.items():
+            section = self.raw.get(name)
+            if isinstance(section, dict):
+                out.extend(f"{name}.{key}" for key in section if key not in known)
+        return out
 
     @property
     def scope(self) -> Scope:
@@ -112,7 +150,9 @@ def non_negative(
         if kind is int and isinstance(raw, float) and raw != value:
             raise ValueError
     except (TypeError, ValueError, OverflowError):
-        raise ValueError(f"{where}.{key}={raw!r}: ожидалось неотрицательное число") from None
+        # Значение не показывается (договор `atlas-config`): называется ключ и что ждали.
+        raise ValueError(t(f"{where}.{key}: ожидалось неотрицательное число",
+                           f"{where}.{key}: expected a non-negative number")) from None
     return value
 
 
@@ -161,8 +201,14 @@ def load(start: Optional[Path] = None) -> Config:
     if not isinstance(raw, dict):
         raise ConfigError(t(f"{path}: ожидался объект на верхнем уровне, получено {type(raw).__name__}",
                             f"{path}: expected an object at the top level, got {type(raw).__name__}"))
+    for name in KNOWN_KEYS:
+        if raw.get(name) is not None and not isinstance(raw.get(name), dict):
+            raise ConfigError(t(f"{path}: раздел {name} — не объект",
+                                f"{path}: section {name} is not an object"))
 
-    return Config(root=path.parent, raw=raw)
+    cfg = Config(root=path.parent, raw=raw)
+    cfg.artifacts_dir  # noqa: B018 — UNC и не строка отвергаются сразу, а не при записи
+    return cfg
 
 
 def env(name: str, default: str = "") -> str:

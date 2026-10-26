@@ -167,14 +167,14 @@ def test_scope_defaults_keep_the_single_project_case_unchanged():
 
 
 def test_scope_from_env(monkeypatch):
-    monkeypatch.setenv("ATLAS_SYSTEM", "с")
-    monkeypatch.setenv("ATLAS_ENV", "к")
-    assert Scope.from_env().as_dict() == {"system": "с", "env": "к"}
+    monkeypatch.setenv("ATLAS_SYSTEM", "shop")
+    monkeypatch.setenv("ATLAS_ENV", "test")
+    assert Scope.from_env().as_dict() == {"system": "shop", "env": "test"}
 
 
 def test_scope_lays_artifacts_out_by_system_and_env(tmp_path):
-    path = Scope("с", "к").path(tmp_path, "bus.flow")
-    assert path == tmp_path / "с" / "к" / "bus_flow.json"
+    path = Scope("shop", "test").path(tmp_path, "bus.flow")
+    assert path == tmp_path / "shop" / "test" / "bus_flow.json"
 
 
 def test_scope_from_a_document_without_one_is_the_default():

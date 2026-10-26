@@ -66,19 +66,19 @@ def test_an_absolute_artifacts_dir_is_left_alone(tmp_path):
 def test_scope_comes_from_the_environment_not_from_the_file(tmp_path, monkeypatch):
     """Файл один на все контуры; контур — различие окружения, а не файла."""
     write(tmp_path, "scope:\n  system: изфайла\n  env: изфайла\n")
-    monkeypatch.setenv("ATLAS_SYSTEM", "из_окружения")
-    monkeypatch.setenv("ATLAS_ENV", "контур")
+    monkeypatch.setenv("ATLAS_SYSTEM", "from-env")
+    monkeypatch.setenv("ATLAS_ENV", "stage")
     assert cfgmod.load(tmp_path).scope.as_dict() == {
-        "system": "из_окружения",
-        "env": "контур",
+        "system": "from-env",
+        "env": "stage",
     }
 
 
 def test_path_for_lays_the_artifact_out_by_scope(tmp_path, monkeypatch):
     write(tmp_path, "artifacts_dir: atlas\n")
-    monkeypatch.setenv("ATLAS_SYSTEM", "с")
-    monkeypatch.setenv("ATLAS_ENV", "к")
-    assert cfgmod.load(tmp_path).path_for("db.schema") == tmp_path / "atlas" / "с" / "к" / "db_schema.json"
+    monkeypatch.setenv("ATLAS_SYSTEM", "shop")
+    monkeypatch.setenv("ATLAS_ENV", "test")
+    assert cfgmod.load(tmp_path).path_for("db.schema") == tmp_path / "atlas" / "shop" / "test" / "db_schema.json"
 
 
 def test_env_reads_the_variable_the_file_named(monkeypatch):

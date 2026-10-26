@@ -221,10 +221,20 @@ def test_build_carries_the_source_it_is_given():
         ("http://host/v3/api-docs", "http://host/v3/api-docs"),
         ("https://user@host/docs?apikey=1", "https://host/docs"),
         ("https://[::1]:9000/docs?x=1", "https://[::1]:9000/docs"),
+        # Сырые `/ ? #` в пароле: граница userinfo не видна — закрыто на отказ, а не догадка
+        # (находка security 2: раньше утекал пароль целиком или его начало).
+        ("https://user:pa/ss@h.example/spec.json", "https://<redacted>"),
+        ("https://user:pa#ss@h/x", "https://<redacted>"),
+        ("https://user:pa?ss@h/x", "https://<redacted>"),
     ],
 )
-def test_a_url_loses_credentials_query_and_fragment(адрес, ожидалось):
-    assert openapi.redact_url(адрес) == ожидалось
+def test_the_url_source_loses_credentials_query_and_fragment(адрес, ожидалось):
+    """Очистка адреса — `partest.redact.redact_url` у владельца, своей копии нет."""
+    assert openapi.source_of("s", "url", адрес)["location"] == ожидалось
+
+
+def test_there_is_no_own_copy_of_url_redaction():
+    assert not hasattr(openapi, "redact_url")
 
 
 def test_the_url_source_is_redacted_and_the_local_one_kept_as_declared():

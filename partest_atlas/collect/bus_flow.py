@@ -137,25 +137,25 @@ def open_reader(section: Mapping[str, Any]):
         return None
     module_name, _, attr = str(target).partition(":")
     if not attr:
-        raise ReaderNotConfigured(f"bus_flow.reader={target!r}: ожидалось 'модуль:функция'")
+        raise ReaderNotConfigured("bus_flow.reader: ожидалось 'модуль:функция'")
     try:
         module = importlib.import_module(module_name)
     except Exception as exc:
-        raise ReaderNotConfigured(f"bus_flow.reader={target!r} не импортируется: {exc}") from exc
+        raise ReaderNotConfigured(f"bus_flow.reader не импортируется ({type(exc).__name__})") from exc
 
     guard = section.get("configured")
     if guard:
         check = getattr(module, str(guard), None)
         if check is None:
             raise ReaderNotConfigured(
-                f"bus_flow.configured={guard!r}: в {module_name} такой функции нет"
+                "bus_flow.configured: в названном модуле такой функции нет"
             )
         if not check():
             return None
 
     factory = getattr(module, attr, None)
     if factory is None:
-        raise ReaderNotConfigured(f"bus_flow.reader={target!r}: в {module_name} нет {attr!r}")
+        raise ReaderNotConfigured("bus_flow.reader: в названном модуле такой функции нет")
     return factory()
 
 

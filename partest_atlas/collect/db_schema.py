@@ -62,18 +62,26 @@ SELECT tc.table_schema, tc.table_name, kcu.column_name
    AND tc.table_schema = ANY(%(schemas)s)
 """
 
+#: Внешние ключи с целью. Каждое соединение — по имени **и схеме** ограничения: имена
+#: ограничений уникальны только внутри схемы, и при `fk_user` в двух схемах соединение по
+#: одному имени давало чужую цель, а на N одинаковых схемах — N² строк на ключ. Цель — из
+#: `key_column_usage` уникального ограничения по позиции столбца, а не из
+#: `constraint_column_usage`: у составного ключа та давала произведение столбцов.
 FOREIGN_KEYS_SQL = """
 SELECT tc.table_schema, tc.table_name, kcu.column_name,
-       ccu.table_name AS ref_table, ccu.column_name AS ref_column,
-       rc.delete_rule
+       rkcu.table_schema AS ref_schema, rkcu.table_name AS ref_table,
+       rkcu.column_name AS ref_column, rc.delete_rule
   FROM information_schema.table_constraints tc
   JOIN information_schema.key_column_usage kcu
     ON kcu.constraint_name = tc.constraint_name
-   AND kcu.table_schema = tc.table_schema
-  JOIN information_schema.constraint_column_usage ccu
-    ON ccu.constraint_name = tc.constraint_name
+   AND kcu.constraint_schema = tc.constraint_schema
   JOIN information_schema.referential_constraints rc
     ON rc.constraint_name = tc.constraint_name
+   AND rc.constraint_schema = tc.constraint_schema
+  JOIN information_schema.key_column_usage rkcu
+    ON rkcu.constraint_name = rc.unique_constraint_name
+   AND rkcu.constraint_schema = rc.unique_constraint_schema
+   AND rkcu.ordinal_position = kcu.position_in_unique_constraint
  WHERE tc.constraint_type = 'FOREIGN KEY'
    AND tc.table_schema = ANY(%(schemas)s)
 """
@@ -81,7 +89,7 @@ SELECT tc.table_schema, tc.table_name, kcu.column_name,
 #: Оценка из статистики планировщика, а не `count(*)`. Точное число строк стоит полного
 #: прохода по таблице, а карте нужен порядок величины — «сто» против «миллион».
 APPROX_ROWS_SQL = """
-SELECT relname AS table_name, n_live_tup AS rows
+SELECT schemaname AS table_schema, relname AS table_name, n_live_tup AS rows
   FROM pg_stat_user_tables
  WHERE schemaname = ANY(%(schemas)s)
 """
@@ -120,23 +128,28 @@ def build(
     label: str = "PostgreSQL",
     key: str = DEFAULT_KEY,
 ) -> Dict[str, Any]:
-    """Слепить содержание артефакта из прочитанных строк. Базы здесь нет и быть не должно."""
+    """Слепить содержание артефакта из прочитанных строк. Базы здесь нет и быть не должно.
+
+    Таблица — пара (схема, имя): в разных схемах бывают одноимённые таблицы, и число строк
+    или исключение по одному имени достались бы чужой. `exclude` принимает имя (во всех
+    схемах) или `схема.имя`, без учёта регистра. У внешнего ключа — схема цели (`schema`).
+    """
     excluded = {name.lower() for name in exclude}
     pk_set = {(r["table_schema"], r["table_name"], r["column_name"]) for r in primary_keys}
-    fk_map = {
-        (r["table_schema"], r["table_name"], r["column_name"]): {
-            "table": r["ref_table"],
-            "column": r["ref_column"],
-            "onDelete": r.get("delete_rule"),
-        }
-        for r in foreign_keys
-    }
-    rows_by_table = {r["table_name"]: r["rows"] for r in row_counts}
+    fk_map = {}
+    for r in foreign_keys:
+        target = {"table": r["ref_table"], "column": r["ref_column"], "onDelete": r.get("delete_rule")}
+        if r.get("ref_schema"):
+            target["schema"] = r["ref_schema"]
+        fk_map[(r["table_schema"], r["table_name"], r["column_name"])] = target
+    # Строки без схемы (вызывающий, собравший их сам по-старому) — по имени.
+    rows_by_table = {(r.get("table_schema"), r["table_name"]): r["rows"] for r in row_counts}
 
     tables: Dict[str, Dict[str, Any]] = {}
     for column in columns:
         table_name = column["table_name"]
-        if table_name.lower() in excluded:
+        schema_name = column["table_schema"]
+        if table_name.lower() in excluded or f"{schema_name}.{table_name}".lower() in excluded:
             continue
         table_key = f'{column["table_schema"]}.{table_name}'
         table = tables.setdefault(
@@ -144,7 +157,7 @@ def build(
             {
                 "schema": column["table_schema"],
                 "name": table_name,
-                "rows": rows_by_table.get(table_name),
+                "rows": rows_by_table.get((schema_name, table_name), rows_by_table.get((None, table_name))),
                 "columns": [],
             },
         )

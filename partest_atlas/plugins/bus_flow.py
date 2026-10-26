@@ -33,6 +33,9 @@ from partest_atlas.collect.bus_flow import ReaderNotConfigured
 from partest_atlas.config import Config, load, non_negative
 
 ENABLE_ENV = "ATLAS_BUS_FLOW"
+
+#: Сколько последних прогонов держать в `bus_flow.json` (`bus_flow.keep_runs`; `0` — все).
+DEFAULT_KEEP_RUNS = 20
 MARKER = "bus_flow"
 
 _state: Dict[str, Any] = {}
@@ -43,6 +46,13 @@ def _on() -> bool:
 
 
 def _note(reason: str, *, misconfigured: bool = False) -> None:
+    # Текст исключений брокера бывает с адресом и учётными данными: через `partest.redact`.
+    try:
+        from partest.redact import redact_text  # noqa: PLC0415 — только когда включены
+
+        reason = redact_text(reason)
+    except Exception:  # pragma: no cover - partest — зависимость пакета
+        pass
     _state["note"] = reason
     if misconfigured:
         print(f"[atlas] bus_flow ВЫКЛЮЧЕН ОШИБКОЙ КОНФИГУРАЦИИ — чинить здесь: {reason}")
@@ -66,6 +76,8 @@ def pytest_configure(config) -> None:
         settle = non_negative(
             section, "settle_sec", bus_flow.DEFAULT_SETTLE_SEC, float, where=MARKER
         )
+        keep_runs = non_negative(section, "keep_runs", DEFAULT_KEEP_RUNS, int, where=MARKER)
+        cfg.scope  # noqa: B018 — негодная область — сейчас, а не INTERNALERROR в конце
     except Exception as exc:
         _note(f"{type(exc).__name__}: {exc}", misconfigured=True)
         # Строка `note` в состоянии — не включённый плагин: дальше хуки шли бы в
@@ -77,6 +89,7 @@ def pytest_configure(config) -> None:
         section=section,
         include=list(section.get("include") or []),
         settle=settle,
+        keep_runs=keep_runs,
         records=[],
         run=artifacts.run_label(),
     )
@@ -141,6 +154,7 @@ def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ARG001
     artifacts.append_records(
         path, bus_flow.KIND, "records", records,
         scope=cfg.scope, collector="partest-atlas/bus_flow",
+        keep_runs=_state.get("keep_runs", DEFAULT_KEEP_RUNS),
     )
     print(
         f"[atlas] bus_flow: записей {len(records)}, "

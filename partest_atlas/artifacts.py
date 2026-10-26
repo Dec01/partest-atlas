@@ -39,12 +39,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from dataclasses import field as _field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from partest_atlas.lang import t
 
@@ -86,6 +87,23 @@ RUN_ID_ENV = "ATLAS_RUN_ID"
 
 DEFAULT_SCOPE_KEY = "default"
 
+_SCOPE_PART_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+SCOPE_RULE_RU = ("имя области — латиница, цифры, `.`, `_`, `-`; не `.` и не `..`, без `..` "
+                 "внутри")
+SCOPE_RULE_EN = ("a scope name is Latin letters, digits, `.`, `_`, `-`; not `.` or `..`, no "
+                 "`..` inside")
+
+
+def valid_scope_part(value: Any) -> bool:
+    """Годится ли *value* именем системы или контура — одно правило для агента и читателя."""
+    return (
+        isinstance(value, str)
+        and bool(_SCOPE_PART_RE.match(value))
+        and value not in (".", "..")
+        and ".." not in value
+    )
+
 
 @dataclass(frozen=True)
 class Scope:
@@ -93,17 +111,36 @@ class Scope:
 
     Значения по умолчанию делают однопроектный случай неотличимым от прежнего: проект,
     который про системы и контуры ничего не знает, продолжает работать.
+
+    **Имя области — имя каталога, и правило его — здесь, у владельца формата**
+    (:func:`valid_scope_part`): латиница, цифры, ``.``, ``_``, ``-``; не ``.``, не ``..`` и
+    без ``..`` внутри. Другое имя — ``ValueError`` при создании: такой артефакт читающая
+    программа не покажет, а ``..`` или разделитель вывели бы запись за каталог артефактов.
     """
 
     system: str = DEFAULT_SCOPE_KEY
     env: str = DEFAULT_SCOPE_KEY
 
+    def __post_init__(self) -> None:
+        for part, value in (("system", self.system), ("env", self.env)):
+            if not valid_scope_part(value):
+                # Значение не показывается: им бывает что угодно из чужого окружения.
+                raise ValueError(t(
+                    f"scope.{part}: {SCOPE_RULE_RU}",
+                    f"scope.{part}: {SCOPE_RULE_EN}",
+                ))
+
     @classmethod
     def from_env(cls) -> "Scope":
-        return cls(
-            system=os.getenv("ATLAS_SYSTEM") or DEFAULT_SCOPE_KEY,
-            env=os.getenv("ATLAS_ENV") or DEFAULT_SCOPE_KEY,
-        )
+        """Область из ``ATLAS_SYSTEM``/``ATLAS_ENV``. Негодное имя — ``ValueError`` с именем
+        переменной (не значением)."""
+        parts = {}
+        for part, name in (("system", "ATLAS_SYSTEM"), ("env", "ATLAS_ENV")):
+            value = os.getenv(name) or DEFAULT_SCOPE_KEY
+            if not valid_scope_part(value):
+                raise ValueError(t(f"{name}: {SCOPE_RULE_RU}", f"{name}: {SCOPE_RULE_EN}"))
+            parts[part] = value
+        return cls(**parts)
 
     @classmethod
     def from_doc(cls, doc: Dict[str, Any]) -> "Scope":
@@ -161,6 +198,23 @@ def read(path: Path) -> Dict[str, Any]:
         return {}
 
 
+def redact_payload(value: Any) -> Any:
+    """Копия *value*, где каждая строка — значения и ключи словарей — прошла
+    `partest.redact.redact_text`. Числа, ``None`` и булевы — как есть."""
+    from partest.redact import redact_text  # noqa: PLC0415 — partest нужен только при записи
+
+    def walk(item: Any) -> Any:
+        if isinstance(item, str):
+            return redact_text(item)
+        if isinstance(item, Mapping):
+            return {(redact_text(k) if isinstance(k, str) else k): walk(v) for k, v in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [walk(v) for v in item]
+        return item
+
+    return walk(value)
+
+
 def _collected_at(value: Any) -> str:
     """Время съёмки для шапки: строка как есть, `datetime` — ISO, ничего — сейчас."""
     if value is None:
@@ -182,13 +236,22 @@ def write(
     scope: Optional[Scope] = None,
     collector: str = "",
     collected_at: Any = None,
+    redact: bool = True,
 ) -> None:
     """Записать артефакт атомарно.
 
     *collected_at* — время съёмки, если оно не «сейчас»: детерминированный набор (демо,
     тест) или наблюдение, снятое раньше записи. Строка пишется как есть, `datetime` — в
     ISO 8601; без него — текущее время с часовым поясом.
+
+    **Всё, что попадает в артефакт, проходит `partest.redact`** (красная линия 6): каждая
+    строка полезной нагрузки — значения и ключи — через `redact_text`
+    (:func:`redact_payload`). Имена таблиц, путей и топиков она не меняет; меняет то, что
+    выглядит секретом (`password=…`, `Bearer …`, `user:pw@host`). *redact* ``False`` —
+    только для уже замаскированного (``append_records``).
     """
+    if redact:
+        payload = redact_payload(payload)
     _atomic_write(
         Path(path),
         {
@@ -306,6 +369,9 @@ def validate(
             if not isinstance(doc_scope.get(part), str) or not doc_scope.get(part):
                 problems.append(not_text(f"scope.{part}", doc_scope.get(part)))
                 bad = True
+            elif not valid_scope_part(doc_scope[part]):
+                problems.append(t(f"scope.{part}: {SCOPE_RULE_RU}", f"scope.{part}: {SCOPE_RULE_EN}"))
+                bad = True
         if not bad and scope is not None and Scope.from_doc(doc) != scope:
             problems.append(t(
                 f"в файле scope={doc_scope['system']}/{doc_scope['env']}, а лежит он в "
@@ -330,6 +396,41 @@ def validate(
     return problems
 
 
+def _started(record: Mapping[str, Any]) -> Optional[datetime]:
+    run = record.get("run")
+    stamp = run.get("startedAt") if isinstance(run, Mapping) else None
+    if not isinstance(stamp, str):
+        return None
+    try:
+        when = datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.astimezone()
+
+
+def keep_last_runs(records: List[dict], keep_runs: int) -> List[dict]:
+    """Записи последних *keep_runs* прогонов по ``run.startedAt``. ``0`` — все.
+
+    Записи без метки (снятые до неё) считаются одним прогоном старше любого помеченного:
+    они уходят первыми. Порядок оставшихся не меняется.
+    """
+    if keep_runs <= 0:
+        return list(records)
+    oldest = datetime.min.replace(tzinfo=timezone.utc)
+    runs: Dict[Any, datetime] = {}
+    for record in records:
+        run = record.get("run")
+        ident = json.dumps(run, sort_keys=True, ensure_ascii=False) if isinstance(run, Mapping) else None
+        when = _started(record) or oldest
+        runs[ident] = max(runs.get(ident, oldest), when)
+    kept = set(sorted(runs, key=lambda i: runs[i], reverse=True)[:keep_runs])
+    return [
+        r for r in records
+        if (json.dumps(r["run"], sort_keys=True, ensure_ascii=False)
+            if isinstance(r.get("run"), Mapping) else None) in kept
+    ]
+
+
 def append_records(
     path: Path,
     kind: str,
@@ -339,11 +440,14 @@ def append_records(
     scope: Optional[Scope] = None,
     collector: str = "",
     collected_at: Any = None,
+    keep_runs: int = 0,
 ) -> None:
     """Дописать записи в артефакт-список, схлопывая точные повторы.
 
     Существующее содержимое берётся, только если вид совпал: иначе файл от другого сборщика
-    молча слился бы с новым.
+    молча слился бы с новым. *keep_runs* больше нуля — после дописки остаются записи
+    последних стольких прогонов (:func:`keep_last_runs`): с меткой прогона записи разных
+    прогонов не схлопываются, и без предела файл растёт с каждым прогоном.
     """
     if not records:
         return
@@ -351,13 +455,16 @@ def append_records(
     doc = read(path)
     existing: List[dict] = list(doc.get(key) or []) if doc.get("kind") == kind else []
     seen = {json.dumps(r, sort_keys=True, ensure_ascii=False) for r in existing}
-    for record in records:
+    # Маскировка — до сравнения: прежние записи уже прошли её при записи.
+    for record in redact_payload(list(records)):
         signature = json.dumps(record, sort_keys=True, ensure_ascii=False)
         if signature not in seen:
             seen.add(signature)
             existing.append(record)
+    if keep_runs and keep_runs > 0:
+        existing = keep_last_runs(existing, keep_runs)
     write(path, kind, {key: existing}, scope=scope, collector=collector,
-          collected_at=collected_at)
+          collected_at=collected_at, redact=False)
 
 
 def discover_scopes(artifacts_dir: Path) -> List[Scope]:
@@ -371,8 +478,8 @@ def discover_scopes(artifacts_dir: Path) -> List[Scope]:
     out: List[Scope] = []
     if not base.is_dir():
         return out
-    for system in sorted(p for p in base.iterdir() if p.is_dir()):
-        for env in sorted(p for p in system.iterdir() if p.is_dir()):
+    for system in sorted(p for p in base.iterdir() if p.is_dir() and valid_scope_part(p.name)):
+        for env in sorted(p for p in system.iterdir() if p.is_dir() and valid_scope_part(p.name)):
             if any((env / name).is_file() for name in known):
                 out.append(Scope(system=system.name, env=env.name))
     return out
@@ -459,7 +566,10 @@ def scope_of(path: Path) -> Optional[Scope]:
     path = Path(path)
     if path.name not in KINDS.values() or len(path.parts) < 3:
         return None
-    return Scope(system=path.parent.parent.name, env=path.parent.name)
+    system, env = path.parent.parent.name, path.parent.name
+    if not (valid_scope_part(system) and valid_scope_part(env)):
+        return None
+    return Scope(system=system, env=env)
 
 
 def kind_of(path: Path) -> Optional[str]:
@@ -470,6 +580,8 @@ def kind_of(path: Path) -> Optional[str]:
 
 __all__ = [
     "DEFAULT_SCOPE_KEY",
+    "SCOPE_RULE_EN",
+    "SCOPE_RULE_RU",
     "Inspection",
     "KINDS",
     "PAYLOAD_KEYS",
@@ -481,10 +593,13 @@ __all__ = [
     "discover_scopes",
     "filename",
     "inspect",
+    "keep_last_runs",
+    "redact_payload",
     "kind_of",
     "read",
     "run_label",
     "scope_of",
+    "valid_scope_part",
     "validate",
     "write",
 ]

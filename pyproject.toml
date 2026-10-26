@@ -22,11 +22,13 @@ classifiers = [
     "Topic :: Software Development :: Testing",
 ]
 
-# partest импортируется командой `collect` (confpartest, клиент HTTP под политикой TLS,
-# redact, проверка «только SELECT»). Пол 2.6.0: раньше импорт partest грузил OpenAPI
-# по сети прямо на импорте модуля покрытия — нарушение «нулевого исходящего трафика».
+# partest импортируется при записи артефакта (`partest.redact` — всё, что попадает в
+# артефакт) и командой `collect` (confpartest, `partest.openapi.resolve_swagger`, проверка
+# «только SELECT»). Пол 2.8: загрузка спецификации и `redact_url` — у владельца, своей
+# копии в atlas нет (до 2.8 их нет в partest). С 2.6.0 импорт partest не ходит в сеть —
+# этот довод пола держится и дальше. Потолок <3: мажор partest — смена публичного API.
 dependencies = [
-    "partest>=2.6.0",
+    "partest>=2.8,<3",
     "PyYAML>=6.0.2",
 ]
 

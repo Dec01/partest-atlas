@@ -112,17 +112,31 @@ def test_openapi_from_a_local_spec_writes_the_contract(проект, запус�
     assert "contract.openapi" in out and "операций 2" in out
 
 
-def test_a_relative_local_path_is_taken_from_the_confpartest_directory(проект, запустить, tmp_path):
-    """Текущий каталог — другой (фикстура), и файл с тем же именем там есть, но не тот."""
+def test_a_relative_local_path_falls_back_to_the_confpartest_directory(проект, запустить):
+    """Текущий каталог — другой (фикстура), и файла от него нет: берётся от `confpartest.py`."""
     _confpartest(проект, {"магазин": ["local", "spec/openapi.json"]})
     _спецификация(проект)
-    обманка = {**СПЕЦИФИКАЦИЯ, "info": {"title": "не тот", "version": "0"}}
-    _спецификация(tmp_path / "где-то", документ=обманка)
 
     код, _, err = запустить("collect", "openapi", "--root", проект)
 
     assert код == 0, err
     assert artifacts.read(_артефакт(проект, "contract.openapi"))["info"]["title"] == "Магазин"
+
+
+def test_a_relative_local_path_existing_from_the_cwd_is_taken_from_there(проект, запустить, tmp_path):
+    """Правило partest (как у его покрытия): путь, существующий от текущего каталога,
+    сохраняет смысл. Иначе контракт карты и покрытие partest читали бы разные файлы."""
+    _confpartest(проект, {"магазин": ["local", "spec/openapi.json"]})
+    _спецификация(проект)
+    от_cwd = {**СПЕЦИФИКАЦИЯ, "info": {"title": "от текущего", "version": "0"}}
+    _спецификация(tmp_path / "где-то", документ=от_cwd)
+
+    код, _, err = запустить("collect", "openapi", "--root", проект)
+
+    assert код == 0, err
+    doc = artifacts.read(_артефакт(проект, "contract.openapi"))
+    assert doc["info"]["title"] == "от текущего"
+    assert doc["source"]["location"] == "spec/openapi.json"  # как объявлен
 
 
 def test_a_yaml_spec_is_read_too(проект, запустить):
@@ -151,50 +165,116 @@ def test_without_root_the_atlas_yaml_directory_is_the_project(проект, за
 def test_the_scope_comes_from_flags_over_the_environment(проект, запустить, monkeypatch):
     _confpartest(проект, {"магазин": ["local", "spec/openapi.json"]})
     _спецификация(проект)
-    monkeypatch.setenv("ATLAS_SYSTEM", "склад")
-    monkeypatch.setenv("ATLAS_ENV", "тест")
+    monkeypatch.setenv("ATLAS_SYSTEM", "warehouse")
+    monkeypatch.setenv("ATLAS_ENV", "test")
 
-    код, _, err = запустить("collect", "openapi", "--root", проект, "--env", "препрод")
+    код, _, err = запустить("collect", "openapi", "--root", проект, "--env", "preprod")
 
     assert код == 0, err
-    doc = artifacts.read(_артефакт(проект, "contract.openapi", "склад", "препрод"))
-    assert doc["scope"] == {"system": "склад", "env": "препрод"}
+    doc = artifacts.read(_артефакт(проект, "contract.openapi", "warehouse", "preprod"))
+    assert doc["scope"] == {"system": "warehouse", "env": "preprod"}
 
 
-@pytest.mark.parametrize("значение", ["..", "../чужое", "a/b", "a\\b", "C:"])
+def test_a_bad_scope_in_the_environment_is_named_without_its_value(проект, запустить, monkeypatch):
+    _confpartest(проект, {"магазин": ["local", "spec/openapi.json"]})
+    _спецификация(проект)
+    monkeypatch.setenv("ATLAS_SYSTEM", "Склад секретный")
+
+    код, _, err = запустить("collect", "openapi", "--root", проект)
+
+    строка = _одна_строка(err)
+    assert код == 1 and "ATLAS_SYSTEM" in строка and "секретный" not in строка
+
+
+@pytest.mark.parametrize("значение", ["..", "../чужое", "a/b", "a\\b", "C:", "Склад", "a b", "a..b"])
 def test_a_scope_that_would_leave_the_artifacts_directory_is_refused(проект, запустить, значение):
-    """Пишем только в свой каталог артефактов: `..` или разделитель вывели бы запись наружу."""
+    """Пишем только в свой каталог артефактов: `..` или разделитель вывели бы запись наружу.
+    Правило имени — у владельца формата (`artifacts.Scope`), то же, что у читающей
+    программы: `Склад` она не показала бы (находка librarian 3)."""
     _confpartest(проект, {"магазин": ["local", "spec/openapi.json"]})
     _спецификация(проект)
 
     код, out, err = запустить("collect", "openapi", "--root", проект, "--system", значение)
 
-    assert код == 2
+    assert код == 1
     assert "--system" in _одна_строка(err)
     assert not (проект / "atlas").exists()
 
 
-def test_several_specs_need_a_service_and_say_which_exist(проект, запустить):
-    """Выбрать первую молча значило бы снять не тот контракт и не сказать об этом."""
-    _confpartest(проект, {"магазин": ["local", "spec/openapi.json"], "склад": ["local", "other.json"]})
+ВТОРАЯ = {
+    "openapi": "3.0.3",
+    "info": {"title": "Склад", "version": "2.0"},
+    "paths": {"/stock": {"get": {"responses": {"200": {"description": "ok"}}}}},
+}
+
+
+def test_without_service_every_service_is_collected_into_one_artifact(проект, запустить):
+    """Одна область — один `contract.openapi`, а служб несколько: операции всех служб с
+    ключом `service`, по службе — запись в `services` (находка antagonist 2)."""
+    _confpartest(проект, {"магазин": ["local", "spec/openapi.json"], "склад": ["local", "stock.json"]})
     _спецификация(проект)
+    _спецификация(проект, "stock.json", ВТОРАЯ)
 
-    код, _, err = запустить("collect", "openapi", "--root", проект)
+    код, out, err = запустить("collect", "openapi", "--root", проект)
 
-    строка = _одна_строка(err)
-    assert код == 2
-    assert "магазин" in строка and "склад" in строка and "--service" in строка
-    assert not _артефакт(проект, "contract.openapi").exists()
+    assert код == 0, err
+    doc = artifacts.read(_артефакт(проект, "contract.openapi"))
+    assert artifacts.validate(doc) == []
+    assert [s["service"] for s in doc["services"]] == ["магазин", "склад"]
+    assert sorted((op["service"], op["path"]) for op in doc["operations"]) == [
+        ("магазин", "/items"), ("магазин", "/items/{id}"), ("склад", "/stock"),
+    ]
+    assert doc["stats"]["operations"] == 3
+    assert doc["services"][1]["info"] == {"title": "Склад", "version": "2.0"}
+    assert doc["services"][1]["stats"]["operations"] == 1
+    # Верхние `info`/`source` — только у одной службы: у нескольких их брать неоткуда.
+    assert "info" not in doc and "source" not in doc
+    assert "служб 2" in out
 
 
-def test_the_named_service_is_taken(проект, запустить):
+def test_with_service_only_that_service_is_replaced(проект, запустить):
+    _confpartest(проект, {"магазин": ["local", "spec/openapi.json"], "склад": ["local", "stock.json"]})
+    _спецификация(проект)
+    _спецификация(проект, "stock.json", ВТОРАЯ)
+    assert запустить("collect", "openapi", "--root", проект)[0] == 0
+    обновлённая = {**ВТОРАЯ, "info": {"title": "Склад", "version": "3.0"},
+                   "paths": {"/stock": ВТОРАЯ["paths"]["/stock"], "/stock/{id}": ВТОРАЯ["paths"]["/stock"]}}
+    _спецификация(проект, "stock.json", обновлённая)
+
+    код, _, err = запустить("collect", "openapi", "--root", проект, "--service", "склад")
+
+    assert код == 0, err
+    doc = artifacts.read(_артефакт(проект, "contract.openapi"))
+    assert [s["service"] for s in doc["services"]] == ["магазин", "склад"]
+    assert doc["services"][1]["info"]["version"] == "3.0"
+    assert sorted((op["service"], op["path"]) for op in doc["operations"]) == [
+        ("магазин", "/items"), ("магазин", "/items/{id}"), ("склад", "/stock"), ("склад", "/stock/{id}"),
+    ]
+
+
+def test_a_single_service_keeps_info_and_source_on_top(проект, запустить):
     _confpartest(проект, {"склад": ["local", "нет.json"], "магазин": ["local", "spec/openapi.json"]})
     _спецификация(проект)
 
     код, _, err = запустить("collect", "openapi", "--root", проект, "--service", "магазин")
 
     assert код == 0, err
-    assert artifacts.read(_артефакт(проект, "contract.openapi"))["source"]["service"] == "магазин"
+    doc = artifacts.read(_артефакт(проект, "contract.openapi"))
+    assert doc["source"]["service"] == "магазин"
+    assert doc["info"]["title"] == "Магазин"
+    assert [s["service"] for s in doc["services"]] == ["магазин"]
+    assert {op["service"] for op in doc["operations"]} == {"магазин"}
+
+
+def test_one_failing_service_writes_nothing(проект, запустить):
+    """Частичный контракт выглядел бы как полный."""
+    _confpartest(проект, {"магазин": ["local", "spec/openapi.json"], "склад": ["local", "нет.json"]})
+    _спецификация(проект)
+
+    код, _, err = запустить("collect", "openapi", "--root", проект)
+
+    assert код == 1 and "склад" in _одна_строка(err)
+    assert not _артефакт(проект, "contract.openapi").exists()
 
 
 def test_an_unknown_service_is_refused_by_name(проект, запустить):
@@ -202,14 +282,14 @@ def test_an_unknown_service_is_refused_by_name(проект, запустить)
 
     код, _, err = запустить("collect", "openapi", "--root", проект, "--service", "склад")
 
-    assert код == 2
+    assert код == 1
     assert "склад" in _одна_строка(err)
 
 
-def test_no_confpartest_is_one_line_and_code_2(проект, запустить):
+def test_no_confpartest_is_one_line_and_code_1(проект, запустить):
     код, out, err = запустить("collect", "openapi", "--root", проект)
 
-    assert код == 2
+    assert код == 1
     assert "confpartest" in _одна_строка(err)
     assert out == ""
 
@@ -219,7 +299,7 @@ def test_a_confpartest_without_swagger_files_says_what_is_expected(проект,
 
     код, _, err = запустить("collect", "openapi", "--root", проект)
 
-    assert код == 2
+    assert код == 1
     assert "swagger_files" in _одна_строка(err)
 
 
@@ -229,8 +309,8 @@ def test_a_missing_spec_file_says_where_the_path_is_taken_from(проект, з�
     код, _, err = запустить("collect", "openapi", "--root", проект)
 
     строка = _одна_строка(err)
-    assert код == 2
-    assert "нет/openapi.json" in строка and "confpartest.py" in строка
+    assert код == 1
+    assert "нет/openapi.json" in строка and "не получена" in строка
 
 
 def test_a_document_that_is_not_openapi_is_refused(проект, запустить):
@@ -240,7 +320,7 @@ def test_a_document_that_is_not_openapi_is_refused(проект, запусти�
 
     код, _, err = запустить("collect", "openapi", "--root", проект)
 
-    assert код == 2
+    assert код == 1
     assert "OpenAPI" in _одна_строка(err)
     assert not _артефакт(проект, "contract.openapi").exists()
 
@@ -319,7 +399,7 @@ def test_a_url_answering_404_is_one_line_without_secrets(проект, запу�
     код, _, err = запустить("collect", "openapi", "--root", проект)
 
     строка = _одна_строка(err)
-    assert код == 2
+    assert код == 1
     assert "404" in строка
     assert "s3cr3t" not in строка and "token=abc" not in строка
     assert not _артефакт(проект, "contract.openapi").exists()
@@ -334,7 +414,7 @@ def test_an_unreachable_url_is_one_line_without_secrets(проект, запус
     код, _, err = запустить("collect", "openapi", "--root", проект)
 
     строка = _одна_строка(err)
-    assert код == 2
+    assert код == 1
     assert f"127.0.0.1:{порт}" in строка
     assert "s3cr3t" not in строка and "token=abc" not in строка
 
@@ -494,7 +574,7 @@ def test_a_database_that_does_not_confirm_read_only_is_not_queried(проект,
 
     код, _, err = запустить("collect", "db-schema", "--root", проект)
 
-    assert код == 2
+    assert код == 1
     assert "только чтения" in _одна_строка(err)
     assert not any(sql.startswith("SELECT") for sql, _ in _запросы())
     assert _запросы()[-1][0] == postgres.END_SQL
@@ -513,7 +593,7 @@ def test_selected_schemas_without_tables_are_a_loud_error(проект, запу
     код, _, err = запустить("collect", "db-schema", "--root", проект)
 
     строка = _одна_строка(err)
-    assert код == 2
+    assert код == 1
     assert "нет ни одной таблицы" in строка and "public" in строка and "auto" in строка
     assert not _артефакт(проект, "db.schema").exists()
 
@@ -528,14 +608,14 @@ def test_auto_with_no_non_system_schema_is_a_loud_error(проект, запус
 
     код, _, err = запустить("collect", "db-schema", "--root", проект)
 
-    assert код == 2
+    assert код == 1
     assert "auto" in _одна_строка(err)
 
 
 def test_db_schema_without_a_connection_names_the_variable(проект, запустить):
     код, _, err = запустить("collect", "db-schema", "--root", проект)
 
-    assert код == 2
+    assert код == 1
     assert "DATABASE_URL" in _одна_строка(err)
 
 
@@ -549,7 +629,7 @@ def test_a_bad_schemas_value_is_a_configuration_error(проект, запуст
 
     код, _, err = запустить("collect", "db-schema", "--root", проект)
 
-    assert код == 2
+    assert код == 1
     assert "database.schemas" in _одна_строка(err)
 
 
@@ -602,10 +682,10 @@ def _журналы(корень, тело='return {"api": \'ERROR: referenced f
 """
 
 
-def test_container_logs_without_a_source_is_refused_with_code_2(проект, запустить):
+def test_container_logs_without_a_source_is_refused_with_code_1(проект, запустить):
     код, out, err = запустить("collect", "container-logs", "--root", проект)
 
-    assert код == 2
+    assert код == 1
     assert "container_logs.source" in _одна_строка(err)
     assert out == ""
     assert not _артефакт(проект, "containers.logs").exists()
@@ -620,7 +700,7 @@ def test_container_logs_without_rules_is_refused(проект, запустит�
 
     код, _, err = запустить("collect", "container-logs", "--root", проект)
 
-    assert код == 2
+    assert код == 1
     assert "rules" in _одна_строка(err)
 
 
@@ -648,7 +728,7 @@ def test_a_source_that_returns_no_mapping_is_refused(проект, запуст�
 
     код, _, err = запустить("collect", "container-logs", "--root", проект)
 
-    assert код == 2
+    assert код == 1
     assert "str" in _одна_строка(err)
 
 
@@ -658,7 +738,7 @@ def test_a_source_that_returns_no_mapping_is_refused(проект, запуст�
 def test_lang_en_switches_collect_errors(проект, запустить):
     код, _, err = запустить("--lang", "en", "collect", "container-logs", "--root", проект)
 
-    assert код == 2
+    assert код == 1
     assert "is not declared" in _одна_строка(err)
 
 
@@ -667,7 +747,7 @@ def test_the_locale_picks_english_without_the_key(проект, запустит
 
     код, _, err = запустить("collect", "openapi", "--root", проект)
 
-    assert код == 2
+    assert код == 1
     assert "there is no confpartest.py" in _одна_строка(err)
 
 
@@ -676,7 +756,7 @@ def test_the_key_wins_over_the_locale(проект, запустить, monkeypa
 
     код, _, err = запустить("--lang", "ru", "collect", "openapi", "--root", проект)
 
-    assert код == 2
+    assert код == 1
     assert "нет confpartest.py" in _одна_строка(err)
 
 
@@ -746,8 +826,8 @@ def test_a_foreign_confpartest_already_imported_is_refused(проект, capsys)
     код = cli.main(["collect", "openapi", "--root", str(проект)])
 
     err = capsys.readouterr().err
-    assert код == 2
-    assert "не тот confpartest" in _одна_строка(err)
+    assert код == 1
+    assert "другой confpartest" in _одна_строка(err)
     assert not _артефакт(проект, "contract.openapi").exists()
 
 
