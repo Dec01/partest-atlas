@@ -2,7 +2,7 @@
 title: Карта пакета
 status: current
 verified: 2026-10-26
-sources: [partest_atlas/__init__.py, pyproject.toml, partest_atlas/cli.py, partest_atlas/wrap.py, partest_atlas/plugins/db_effects.py, partest_atlas/collect/bus_flow.py, partest_atlas/collect/specs.py, partest_atlas/plugins/bus_flow.py, partest_atlas/config.py, partest_atlas/collect/ui_flow.py]
+sources: [partest_atlas/__init__.py, pyproject.toml, partest_atlas/cli.py, partest_atlas/wrap.py, partest_atlas/plugins/db_effects.py, partest_atlas/collect/db_effects.py, partest_atlas/collect/bus_flow.py, partest_atlas/collect/specs.py, partest_atlas/plugins/bus_flow.py, partest_atlas/plugins/ui_flow.py, partest_atlas/config.py, partest_atlas/collect/ui_flow.py]
 audience: agent
 ---
 
@@ -34,7 +34,7 @@ partest_atlas/
 | Модуль | Что | Страница |
 |---|---|---|
 | `partest_atlas.artifacts` | формат: виды, ключи полезной нагрузки, запись, `validate`, `inspect`, `discover_scopes`, метка прогона | [[components/artifacts]] |
-| `partest_atlas.config` | `atlas.yaml`: `load`, `find`, `Config`, `ConfigError`, `CONFIG_NAME`, `DEFAULT_ARTIFACTS_DIR`, `env`, `non_negative` | этот раздел |
+| `partest_atlas.config` | `atlas.yaml`: `load`, `find`, `Config`, `ConfigError`, `CONFIG_NAME`, `DEFAULT_ARTIFACTS_DIR`, `KNOWN_KEYS`, `env`, `non_negative` | этот раздел |
 | `partest_atlas.collect.history` | история прогонов: `append`, `read`, `trim`, `coverage_snapshot`, `UnreadableHistory`, `KIND`, `DEFAULT_LIMIT`, `COVERAGE_KEYS`, `MAX_BYTES` | [[components/history]] |
 
 Меняются они только с записью в `CHANGELOG.md`. Разделы `atlas.yaml`, которых пакет не
@@ -152,9 +152,13 @@ partest_atlas/
 `run: {id, startedAt}` — одну на процесс (`artifacts.run_label()`); `id` — из
 `ATLAS_RUN_ID`, если его задал тот, кто запускает прогон, иначе случайный. По ней читатель
 отличает последний прогон и знает возраст связи. Записи разных прогонов не схлопываются,
-поэтому в файле остаются записи последних `keep_runs` прогонов по `run.startedAt`
-(`db_effects.keep_runs`, `bus_flow.keep_runs`; по умолчанию 20, `0` — без предела; записи
-без метки уходят первыми). С `db_effects.phases: true` окно
+поэтому в файле остаются записи последних `keep_runs` прогонов (прогон — `run.id`,
+свежесть — наибольший `run.startedAt`) **плюс** последняя запись каждой связи (`nodeid`,
+таблица или топик, `phase`) — правило в [[components/artifacts]]
+(`db_effects.keep_runs`, `bus_flow.keep_runs`; по умолчанию 20, `0` — без предела).
+Повтор теста (pytest-rerunfailures) пишется с `attempt`. Не удалось записать файл
+(битый, чужой, каталог на его месте) — строка `[atlas] … не записан`, а не INTERNALERROR.
+С `db_effects.phases: true` окно
 теста в режиме `test` делится на фазы: у каждой своя дельта и ключ `phase`
 (`setup`/`call`/`teardown`) — эффект фикстуры виден отдельно от эффекта теста ([[proposals]],
 E). Цена — выдержка `settle_sec` на каждой границе: до двух лишних на тест, и они **внутри**
@@ -162,6 +166,12 @@ E). Цена — выдержка `settle_sec` на каждой границе:
 тест с таймаутом 30 с и выдержкой 13 с на двух границах получит таймаут, которого без фаз
 не было. Поэтому **по умолчанию выключено**; включать — когда эффекты фикстур нужно отделить
 и таймауты это выдерживают. Кривое значение (не `true`/`false`) — ошибка конфигурации.
+Не снялась граница фазы — у окна фаз больше нет: оно заканчивается одной дельтой без
+`phase`, эффект не приписывается следующей фазе. В режиме `session` (выше предела,
+`ATLAS_DB_EFFECTS_ALL`, xdist) фаз нет — `phases: true` даёт одну строку `[atlas]` об этом.
+
+Неизвестные ключи своего раздела называют все три плагина (`db_effects`, `bus_flow`,
+`ui_flow`) строкой `[atlas] atlas.yaml: неизвестный ключ …`.
 
 Записи `db.effects` несут `schema` рядом с `table`: одноимённые таблицы двух схем —
 разные записи. Тексты исключений в строках `[atlas] …` проходят `partest.redact`.

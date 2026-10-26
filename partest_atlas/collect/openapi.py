@@ -29,7 +29,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 from partest_atlas import artifacts
 from partest_atlas.artifacts import Scope
@@ -61,65 +61,95 @@ def norm_path(path: str) -> str:
 def _deref(schema: Optional[dict], schemas: Dict[str, dict], depth: int = 0) -> dict:
     """Развернуть `$ref` на один уровень: глубже не нужно и опасно."""
     ref = (schema or {}).get("$ref") or ""
-    if ref.startswith("#/components/schemas/") and depth < MAX_REF_DEPTH:
+    if isinstance(ref, str) and ref.startswith("#/components/schemas/") and depth < MAX_REF_DEPTH:
         return schemas.get(ref.rsplit("/", 1)[-1]) or {}
     return schema or {}
+
+
+#: Потолки разбора. Спецификация — недоверенный ввод: якоря YAML разворачивают 669 байт в
+#: сотни мегабайт, а длинная строка или чужой тип в поле дошли бы до артефакта как есть.
+TEXT_LIMIT = 2000
+PARAMS_LIMIT = 200
+RESPONSES_LIMIT = 100
+TAGS_LIMIT = 50
+
+
+def _text(value: Any) -> str:
+    """Строка с потолком длины; число — его `str`; `None`, список, словарь — пусто.
+    `str()` контейнера не берётся: у списка, развёрнутого якорями YAML, это сотни мегабайт."""
+    if isinstance(value, str):
+        return value[:TEXT_LIMIT]
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)[:TEXT_LIMIT]
+    return ""
+
+
+def _dict(value: Any) -> dict:
+    return value if isinstance(value, dict) else {}
 
 
 def _body(op: dict, schemas: Dict[str, dict]) -> Optional[dict]:
     """Тело запроса. ``None``, когда тела нет — пустой объект читался бы как «есть, но
     пустое», а это разные утверждения."""
-    request_body = op.get("requestBody") or {}
-    content = request_body.get("content") or {}
-    media = content.get("application/json") or next(iter(content.values()), {})
-    raw = (media or {}).get("schema") or {}
-    name = (raw.get("$ref") or "").rsplit("/", 1)[-1]
-    resolved = _deref(raw, schemas)
-    fields = list(resolved.get("properties") or {})
+    request_body = _dict(op.get("requestBody"))
+    content = _dict(request_body.get("content"))
+    media = _dict(content.get("application/json") or next(iter(content.values()), {}))
+    raw = _dict(media.get("schema"))
+    ref = raw.get("$ref")
+    name = _text(ref).rsplit("/", 1)[-1] if isinstance(ref, str) else ""
+    resolved = _dict(_deref(raw, schemas))
+    fields = [_text(f) for f in list(_dict(resolved.get("properties")))[:FIELDS_LIMIT]]
     if not name and not fields:
         return None
+    required = resolved.get("required")
     return {
         "schema": name or None,
         "required": bool(request_body.get("required")),
-        "requiredFields": sorted(resolved.get("required") or []),
-        "fields": fields[:FIELDS_LIMIT],
+        "requiredFields": sorted(_text(f) for f in (required if isinstance(required, list) else [])
+                                 if isinstance(f, str))[:FIELDS_LIMIT],
+        "fields": fields,
     }
 
 
 def parse(document: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Контракт → плоский список операций. Сети здесь нет."""
-    schemas = (document.get("components") or {}).get("schemas") or {}
+    schemas = _dict(_dict(document.get("components")).get("schemas"))
     out: List[Dict[str, Any]] = []
-    for path, item in (document.get("paths") or {}).items():
-        if not isinstance(item, dict):
+    for path, item in _dict(document.get("paths")).items():
+        if not isinstance(item, dict) or not isinstance(path, str):
             continue
+        path = path[:TEXT_LIMIT]
         # Параметры уровня пути принадлежат каждой операции под ним. Потерять их значит
         # объявить обязательный параметр необязательным.
-        shared = item.get("parameters") or []
+        shared = item.get("parameters") if isinstance(item.get("parameters"), list) else []
         for method in METHODS:
             op = item.get(method)
             if not isinstance(op, dict):
                 continue
+            own = op.get("parameters") if isinstance(op.get("parameters"), list) else []
             params = [
-                {"name": p.get("name"), "in": p.get("in"), "required": bool(p.get("required"))}
-                for p in [*shared, *(op.get("parameters") or [])]
-                if p.get("name")
-            ]
+                {"name": _text(p.get("name")), "in": _text(p.get("in")) or None,
+                 "required": bool(p.get("required"))}
+                for p in [*shared, *own]
+                if isinstance(p, dict) and p.get("name")
+            ][:PARAMS_LIMIT]
+            tags = op.get("tags") if isinstance(op.get("tags"), list) else []
+            operation_id = op.get("operationId")
             out.append(
                 {
                     "method": method.upper(),
                     "path": norm_path(path),
                     "rawPath": path,
-                    "operationId": op.get("operationId"),
-                    "tags": list(op.get("tags") or []),
+                    "operationId": _text(operation_id) if operation_id is not None else None,
+                    "tags": [t[:TEXT_LIMIT] for t in tags if isinstance(t, str)][:TAGS_LIMIT],
                     "deprecated": bool(op.get("deprecated")),
                     # Описаний тут может не быть ни одного. Поле остаётся: на другом
                     # проекте они есть, и код не должен узнавать об этом заново.
-                    "summary": op.get("summary") or "",
-                    "description": op.get("description") or "",
+                    "summary": _text(op.get("summary")),
+                    "description": _text(op.get("description")),
                     "params": params,
                     "body": _body(op, schemas),
-                    "responses": sorted((op.get("responses") or {}).keys()),
+                    "responses": sorted(_text(k) for k in _dict(op.get("responses")))[:RESPONSES_LIMIT],
                 }
             )
     return out
@@ -147,7 +177,7 @@ def info_of(document: Mapping[str, Any]) -> Dict[str, Optional[str]]:
 
     def text(key: str) -> Optional[str]:
         value = info.get(key)
-        return None if value is None or isinstance(value, (dict, list)) else str(value)
+        return None if value is None or isinstance(value, (dict, list)) else _text(value)
 
     return {"title": text("title"), "version": text("version")}
 
@@ -307,14 +337,50 @@ def _entries(conf: Any) -> Dict[str, Any]:
     return out
 
 
-def _resolve(entry: Any, base: Path, shown: str) -> Dict[str, Any]:
-    """Документ записи — `partest.openapi.resolve_swagger` с потолками размера и времени."""
+def _resolved_from(location: str, placed: str, base: Path, notes: List[str], shown: str) -> Optional[str]:
+    """Откуда взят относительный локальный путь: ``cwd`` или ``confpartest``. Абсолютный или
+    адрес — ``None``. Если файл с этим путём есть и от текущего каталога, и от каталога
+    `confpartest.py`, и это разные файлы с разным содержимым, — заметка: карта и покрытие
+    partest читают первый, а человек мог ждать второй."""
+    rel = Path(location)
+    if rel.is_absolute():
+        return None
+    in_cwd = (Path.cwd() / rel).resolve()
+    in_conf = (base / rel).resolve()
+    chosen = Path(placed).resolve()
+    if in_cwd != in_conf and in_cwd.is_file() and in_conf.is_file():
+        try:
+            differ = in_cwd.read_bytes() != in_conf.read_bytes()
+        except OSError:
+            differ = True
+        if differ:
+            notes.append(t(
+                f"{shown}: файл есть и от текущего каталога, и от каталога confpartest.py, и они "
+                "различаются — взят от текущего (правило partest)",
+                f"{shown}: the file exists both from the current directory and from the "
+                "directory of confpartest.py, and they differ — the current one is taken "
+                "(the partest rule)",
+            ))
+    if chosen == in_cwd:
+        return "cwd"
+    if chosen == in_conf:
+        return "confpartest"
+    return None
+
+
+def _resolve(entry: Any, base: Path, shown: str, notes: List[str]) -> Tuple[Dict[str, Any], Optional[str]]:
+    """Документ записи — `partest.openapi.resolve_swagger` с потолками размера и времени — и
+    откуда взят локальный относительный путь (:func:`_resolved_from`)."""
     from partest.conf import resolve_entry_location  # noqa: PLC0415
     from partest.openapi import OpenApiResolveError, resolve_swagger  # noqa: PLC0415
 
     # Относительный локальный путь — по правилу partest (как у его покрытия): от текущего
     # каталога, если там есть файл, иначе от каталога `confpartest.py`.
     placed = resolve_entry_location((entry.kind, entry.location), conf_dir=base)
+    resolved_from = (
+        _resolved_from(entry.location, placed.location, base, notes, shown)
+        if entry.kind == "local" else None
+    )
     try:
         document = resolve_swagger(
             (placed.kind, placed.location),
@@ -335,28 +401,13 @@ def _resolve(entry: Any, base: Path, shown: str) -> Dict[str, Any]:
             f"{shown}: не похоже на OpenAPI — нет ключа openapi или swagger",
             f"{shown}: does not look like OpenAPI — no openapi or swagger key",
         ))
-    return document
+    return document, resolved_from
 
 
-def load_from_confpartest(
-    root: Union[str, Path], *, service: Optional[str] = None
-) -> List[Loaded]:
-    """Спецификации, объявленные в `confpartest.swagger_files` проекта в *root*.
-
-    Без *service* — все службы, в порядке объявления; с *service* — только она. Загрузка и
-    разбор — `partest.openapi.resolve_swagger` (под политикой TLS проекта, с потолком
-    размера, времени шага, времени между шагами и числа переадресаций). Любая неудача — :class:`SourceError` без секретов, и ни одна служба
-    тогда не возвращается: частичный контракт выглядел бы как полный.
-
-    Локальный относительный путь — по правилу partest
-    (`partest.conf.resolve_entry_location`): сначала от текущего каталога, затем от каталога
-    `confpartest.py`.
-
-    `confpartest.py` импортируется (это код проекта), но **не так, как при прогоне pytest**:
-    нет `conftest.py`, `pythonpath` из `pytest.ini`, `env =` из pytest-env и `.env`, который
-    подгружает conftest. Адрес, собранный из переменной окружения, берётся из окружения
-    этого вызова.
-    """
+def _load(
+    root: Union[str, Path], service: Optional[str], notes: List[str]
+) -> Tuple[List[str], List[Loaded]]:
+    """``(службы swagger_files по порядку, загруженные)`` — см. :func:`load_from_confpartest`."""
     conf = _confpartest(root)
     base = Path(getattr(conf, "__file__")).resolve().parent
     entries = _entries(conf)
@@ -372,9 +423,35 @@ def load_from_confpartest(
     for name in names:
         entry = entries[name]
         source = source_of(name, entry.kind, entry.location)
-        document = _resolve(entry, base, f"{source['service']} ({source['location']})")
+        document, resolved_from = _resolve(
+            entry, base, f"{source['service']} ({source['location']})", notes)
+        if resolved_from is not None:
+            source["resolvedFrom"] = resolved_from
         out.append(Loaded(name, document, source))
-    return out
+    return list(entries), out
+
+
+def load_from_confpartest(
+    root: Union[str, Path], *, service: Optional[str] = None, notes: Optional[List[str]] = None
+) -> List[Loaded]:
+    """Спецификации, объявленные в `confpartest.swagger_files` проекта в *root*.
+
+    Без *service* — все службы, в порядке объявления; с *service* — только она. Загрузка и
+    разбор — `partest.openapi.resolve_swagger` (под политикой TLS проекта, с потолком
+    размера, времени шага, времени между шагами и числа переадресаций). Любая неудача —
+    :class:`SourceError` без секретов, и ни одна служба тогда не возвращается: частичный
+    контракт выглядел бы как полный.
+
+    Локальный относительный путь — по правилу partest
+    (`partest.conf.resolve_entry_location`): сначала от текущего каталога, затем от каталога
+    `confpartest.py`; откуда взят — `source.resolvedFrom` (`cwd` или `confpartest`).
+
+    `confpartest.py` импортируется (это код проекта), но **не так, как при прогоне pytest**:
+    нет `conftest.py`, `pythonpath` из `pytest.ini`, `env =` из pytest-env и `.env`, который
+    подгружает conftest. Адрес, собранный из переменной окружения, берётся из окружения
+    этого вызова.
+    """
+    return _load(root, service, notes if notes is not None else [])[1]
 
 
 # --- несколько служб в одном артефакте ------------------------------------------------
@@ -387,15 +464,17 @@ def _service_entry(loaded: Loaded) -> Dict[str, Any]:
         "info": info_of(loaded.document),
         "source": loaded.source,
         "stats": summarize(operations),
+        # Когда снята именно эта служба: при `--service` остальные несут своё прежнее время.
+        "collectedAt": artifacts._now(),
         "_operations": operations,
     }
 
 
 def assemble(services: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Содержание артефакта из служб: операции всех служб с ключом `service`, `services`
-    — по записи на службу (`service`, `info`, `source`, `stats`), общая `stats`. `info` и
-    `source` верхнего уровня — только когда служба одна: у нескольких их нет, и читатель
-    берёт их из `services`."""
+    — по записи на службу (`service`, `info`, `source`, `stats`, `collectedAt`), общая
+    `stats`. `info` и `source` верхнего уровня — только когда служба одна: у нескольких их
+    нет, и читатель берёт их из `services`."""
     operations = [op for s in services for op in s["_operations"]]
     payload: Dict[str, Any] = {
         "operations": operations,
@@ -408,10 +487,13 @@ def assemble(services: List[Dict[str, Any]]) -> Dict[str, Any]:
     return payload
 
 
-def _kept_services(path: Path, scope: Scope, replaced: str, notes: List[str]) -> List[Dict[str, Any]]:
-    """Службы из прежнего артефакта, кроме *replaced* — чтобы `--service` обновлял свою, не
-    затирая остальные. Непонятый файл не даёт ничего (с заметкой); файл новее схемы — отказ:
-    переписать его значило бы потерять то, чего этот пакет не понимает."""
+def _kept_services(
+    path: Path, scope: Scope, replaced: str, declared: List[str], notes: List[str]
+) -> List[Dict[str, Any]]:
+    """Службы из прежнего артефакта, кроме *replaced*, и только те, что ещё объявлены в
+    `swagger_files` (*declared*): убранная из `confpartest.py` служба из артефакта уходит.
+    Имя службы — только строка, повторы схлопнуты (первая запись). Непонятый файл не даёт
+    ничего (с заметкой); файл новее схемы — отказ."""
     found = artifacts.inspect(path, KIND, scope=scope)
     if found.state == artifacts.MISSING:
         return []
@@ -429,28 +511,34 @@ def _kept_services(path: Path, scope: Scope, replaced: str, notes: List[str]) ->
         return []
     doc = found.doc
     rows = doc.get("services")
+    operations = [op for op in doc.get("operations") or [] if isinstance(op, dict)]
     if not isinstance(rows, list):
         # Артефакт одной службы, снятый до `services`: служба — из `source.service`.
-        single = (doc.get("source") or {}).get("service") if isinstance(doc.get("source"), dict) else None
-        if not single:
-            if doc.get("operations"):
+        source = doc.get("source") if isinstance(doc.get("source"), dict) else {}
+        single = source.get("service")
+        if not isinstance(single, str) or not single:
+            if operations:
                 notes.append(t(
                     f"в прежнем {path.name} операции без службы — заменены",
                     f"operations in the previous {path.name} name no service — replaced",
                 ))
             return []
-        rows = [{"service": single, "info": doc.get("info"), "source": doc.get("source"),
-                 "stats": doc.get("stats")}]
-        ops = [{**op, "service": single} for op in doc.get("operations") or [] if isinstance(op, dict)]
-    else:
-        ops = [op for op in doc.get("operations") or [] if isinstance(op, dict)]
-    kept = []
+        rows = [{"service": single, "info": doc.get("info"), "source": source,
+                 "stats": doc.get("stats"), "collectedAt": doc.get("collected_at")}]
+        operations = [{**op, "service": single} for op in operations]
+    allowed = set(declared) - {replaced}
+    by_service: Dict[str, List[Dict[str, Any]]] = {}
+    for op in operations:
+        name = op.get("service")
+        if isinstance(name, str) and name in allowed:
+            by_service.setdefault(name, []).append(op)
+    kept: Dict[str, Dict[str, Any]] = {}
     for row in rows:
-        if not isinstance(row, dict) or row.get("service") == replaced:
+        name = row.get("service") if isinstance(row, dict) else None
+        if not isinstance(name, str) or name not in allowed or name in kept:
             continue
-        name = row.get("service")
-        kept.append({**row, "_operations": [op for op in ops if op.get("service") == name]})
-    return kept
+        kept[name] = {**row, "_operations": by_service.get(name, [])}
+    return list(kept.values())
 
 
 def write(
@@ -461,24 +549,34 @@ def write(
     scope: Optional[Scope] = None,
     notes: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Взять спецификации из `confpartest.py` и положить артефакт. Возвращает содержание.
+    """Взять спецификации из `confpartest.py` и положить артефакт. Возвращает записанное
+    (уже замаскированное) содержание.
 
     Без *service* — все службы `swagger_files`, артефакт пишется заново. С *service* —
-    только она: её операции и запись в `services` заменяются, остальные службы из прежнего
-    артефакта той же области сохраняются. *root* — каталог `confpartest.py`; по умолчанию —
-    каталог `atlas.yaml` (или текущий). *scope* — область, если не та, что в окружении.
-    *notes* — сюда дописываются заметки (прежний файл не понят и т. п.).
+    только она: её операции и запись в `services` заменяются, остальные службы прежнего
+    артефакта той же области сохраняются, если они ещё объявлены в `swagger_files`. Порядок
+    служб и операций — порядок `swagger_files`. *root* — каталог `confpartest.py`; по
+    умолчанию — каталог `atlas.yaml` (или текущий). *scope* — область, если не та, что в
+    окружении. *notes* — сюда дописываются заметки (прежний файл не понят, операций 0…).
+
+    Два одновременных вызова с разными *service* одной области не согласованы: дописка без
+    блокировки, и одна из служб потеряется. Службы одной области собираются одним вызовом
+    без *service* или последовательно.
     """
     cfg = config or load()
     where = scope or cfg.scope
     path = where.path(cfg.artifacts_dir, KIND)
     sink: List[str] = notes if notes is not None else []
-    fresh = [_service_entry(x) for x in load_from_confpartest(root or cfg.root, service=service)]
-    if service is None:
-        services = fresh
-    else:
-        kept = _kept_services(path, where, service, sink)
-        services = kept + fresh
-    payload = assemble(services)
-    artifacts.write(path, KIND, payload, scope=where, collector="partest-atlas/openapi")
-    return payload
+    declared, loaded = _load(root or cfg.root, service, sink)
+    fresh = [_service_entry(x) for x in loaded]
+    for entry in fresh:
+        if not entry["_operations"]:
+            sink.append(t(
+                f"{entry['service']}: операций 0 — в спецификации нет путей",
+                f"{entry['service']}: 0 operations — the specification has no paths",
+            ))
+    services = fresh if service is None else _kept_services(path, where, service, declared, sink) + fresh
+    order = {name: i for i, name in enumerate(declared)}
+    services.sort(key=lambda s: order.get(s["service"], len(order)))
+    return artifacts.write(path, KIND, assemble(services), scope=where,
+                           collector="partest-atlas/openapi")

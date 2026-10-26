@@ -63,9 +63,11 @@ KNOWN_KEYS: Dict[str, frozenset] = {
 
 
 def _is_unc(text: str) -> bool:
-    """Путь UNC (`\\\\сервер\\ресурс`, `//сервер/ресурс`): общий ресурс сети. Договор
-    `atlas-config` их не принимает — запись в чужой ресурс не своя папка артефактов."""
-    return text.startswith(("\\\\", "//"))
+    """UNC в любом написании разделителей — правило у владельца формата
+    (:func:`partest_atlas.artifacts.is_unc`)."""
+    from partest_atlas.artifacts import is_unc  # noqa: PLC0415
+
+    return is_unc(text)
 
 
 class ConfigError(RuntimeError):
@@ -96,7 +98,7 @@ class Config:
         if not isinstance(raw, str):
             raise ConfigError(t("artifacts_dir: ожидался путь строкой",
                                 "artifacts_dir: expected a path as a string"))
-        if _is_unc(raw.strip()):
+        if _is_unc(raw):
             raise ConfigError(t("artifacts_dir: пути UNC (общий ресурс сети) не принимаются",
                                 "artifacts_dir: UNC paths (network shares) are not accepted"))
         path = Path(raw)

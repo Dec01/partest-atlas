@@ -43,7 +43,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from dataclasses import field as _field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -87,7 +87,8 @@ RUN_ID_ENV = "ATLAS_RUN_ID"
 
 DEFAULT_SCOPE_KEY = "default"
 
-_SCOPE_PART_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+#: Через `fullmatch`: у `re.match` с `$` проходил бы и хвостовой перевод строки (`"qa\n"`).
+_SCOPE_PART_RE = re.compile(r"[A-Za-z0-9._-]+")
 
 SCOPE_RULE_RU = ("имя области — латиница, цифры, `.`, `_`, `-`; не `.` и не `..`, без `..` "
                  "внутри")
@@ -95,11 +96,28 @@ SCOPE_RULE_EN = ("a scope name is Latin letters, digits, `.`, `_`, `-`; not `.` 
                  "`..` inside")
 
 
+def is_unc(raw: Any) -> bool:
+    """Путь — общий ресурс сети (UNC), в любом написании разделителей: `\\\\host\\share`,
+    `//host/share`, `/\\host\\share`, `\\/host/share`. Решает `PureWindowsPath` после
+    приведения разделителей, а не начало строки: смешанные разделители обходили проверку."""
+    from pathlib import PureWindowsPath  # noqa: PLC0415
+
+    text = str(raw).strip().replace("/", "\\")
+    drive = PureWindowsPath(text).drive
+    return drive.startswith("\\\\") or text.startswith("\\\\")
+
+
+def _refuse_unc(path: Any, what: str) -> None:
+    if is_unc(path):
+        raise ValueError(t(f"{what}: пути UNC (общий ресурс сети) не принимаются",
+                           f"{what}: UNC paths (network shares) are not accepted"))
+
+
 def valid_scope_part(value: Any) -> bool:
     """Годится ли *value* именем системы или контура — одно правило для агента и читателя."""
     return (
         isinstance(value, str)
-        and bool(_SCOPE_PART_RE.match(value))
+        and _SCOPE_PART_RE.fullmatch(value) is not None
         and value not in (".", "..")
         and ".." not in value
     )
@@ -193,26 +211,107 @@ def read(path: Path) -> Dict[str, Any]:
     if not path.is_file():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         return {}
 
 
-def redact_payload(value: Any) -> Any:
-    """Копия *value*, где каждая строка — значения и ключи словарей — прошла
-    `partest.redact.redact_text`. Числа, ``None`` и булевы — как есть."""
-    from partest.redact import redact_text  # noqa: PLC0415 — partest нужен только при записи
+def _read_strict(path: Path) -> Any:
+    """Строгое чтение для :func:`inspect`: UTF-8 с BOM или без, `NaN`/`Infinity` — не JSON
+    (их не примет `JSON.parse` читающей программы). Не разбирается — ``{}``."""
+    def refuse(token: str) -> Any:
+        raise ValueError(token)
 
-    def walk(item: Any) -> Any:
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8-sig"), parse_constant=refuse)
+    except Exception:
+        return {}
+
+
+#: Поля-идентификаторы: значения пришли из спецификации, каталога базы или брокера и
+#: связывают артефакты между собой. Маскировать их нельзя — `/users/{id}/password:reset`
+#: превращался в `password:***`, и путь контракта переставал совпадать с вызванным. Под
+#: таким ключом не трогается ничего, в том числе ключи вложенного словаря (`found.table` —
+#: имена таблиц). `nodeid` сюда не входит: его параметры пишет тест, и он маскируется.
+IDENTIFIER_KEYS = frozenset({
+    "method", "path", "rawPath", "table", "schema", "name", "column", "topic", "service",
+})
+
+#: Сколько узлов и какой глубины проходит маскировка одного артефакта. Больше — отказ до
+#: записи: бомба якорей YAML в 669 байт разворачивалась в артефакт на 289 МБ.
+REDACT_MAX_NODES = 500_000
+REDACT_MAX_DEPTH = 64
+
+
+class PayloadTooLarge(ValueError):
+    """Полезная нагрузка больше потолка маскировки — артефакт не пишется."""
+
+
+def _secret_keys() -> frozenset:
+    from partest.redact import DEFAULT_SENSITIVE_BODY_KEYS  # noqa: PLC0415
+
+    return frozenset(re.sub(r"[^a-z0-9]", "", k.lower()) for k in DEFAULT_SENSITIVE_BODY_KEYS)
+
+
+def is_secret_key(key: Any) -> bool:
+    """Ключ из списка секретных (`partest.redact.DEFAULT_SENSITIVE_BODY_KEYS`): `password`,
+    `token`, `api_key`, `client_secret`… — без учёта регистра и разделителей (`apiKey`)."""
+    return isinstance(key, str) and re.sub(r"[^a-z0-9]", "", key.lower()) in _secret_keys()
+
+
+def redact_payload(value: Any) -> Any:
+    """Копия *value* для артефакта — через `partest.redact`.
+
+    - строка — `redact_text`; ключ словаря — тоже, а совпавшие после маскировки ключи не
+      сливаются молча: второй получает суффикс ` #2`, ` #3`…;
+    - значение под секретным ключом (:func:`is_secret_key`) — целиком `REDACTED`;
+    - под ключом из :data:`IDENTIFIER_KEYS` — как есть;
+    - числа, ``None``, булевы — как есть.
+
+    Больше :data:`REDACT_MAX_NODES` узлов или глубже :data:`REDACT_MAX_DEPTH` —
+    :class:`PayloadTooLarge`.
+    """
+    from partest.redact import REDACTED, redact_text  # noqa: PLC0415 — только при записи
+
+    budget = [REDACT_MAX_NODES]
+
+    def spend(depth: int) -> None:
+        budget[0] -= 1
+        if budget[0] < 0 or depth > REDACT_MAX_DEPTH:
+            raise PayloadTooLarge(t(
+                f"полезная нагрузка больше потолка ({REDACT_MAX_NODES} узлов, глубина "
+                f"{REDACT_MAX_DEPTH}) — артефакт не записан",
+                f"the payload exceeds the limit ({REDACT_MAX_NODES} nodes, depth "
+                f"{REDACT_MAX_DEPTH}) — the artifact was not written",
+            ))
+
+    def walk(item: Any, depth: int) -> Any:
+        spend(depth)
         if isinstance(item, str):
             return redact_text(item)
         if isinstance(item, Mapping):
-            return {(redact_text(k) if isinstance(k, str) else k): walk(v) for k, v in item.items()}
+            out: Dict[Any, Any] = {}
+            for key, val in item.items():
+                if isinstance(key, str) and key in IDENTIFIER_KEYS:
+                    spend(depth + 1)
+                    new_key, new_val = key, val
+                elif is_secret_key(key):
+                    new_key, new_val = key, (REDACTED if val not in (None, "") else val)
+                else:
+                    new_key = redact_text(key) if isinstance(key, str) else key
+                    new_val = walk(val, depth + 1)
+                if new_key in out:
+                    n = 2
+                    while f"{new_key} #{n}" in out:
+                        n += 1
+                    new_key = f"{new_key} #{n}"
+                out[new_key] = new_val
+            return out
         if isinstance(item, (list, tuple)):
-            return [walk(v) for v in item]
+            return [walk(v, depth + 1) for v in item]
         return item
 
-    return walk(value)
+    return walk(value, 0)
 
 
 def _collected_at(value: Any) -> str:
@@ -237,7 +336,7 @@ def write(
     collector: str = "",
     collected_at: Any = None,
     redact: bool = True,
-) -> None:
+) -> Dict[str, Any]:
     """Записать артефакт атомарно.
 
     *collected_at* — время съёмки, если оно не «сейчас»: детерминированный набор (демо,
@@ -263,6 +362,8 @@ def write(
             **payload,
         },
     )
+    # Возвращается записанное — уже замаскированное: печатать надо его, а не исходное.
+    return payload
 
 
 _run: Dict[str, str] = {}
@@ -280,7 +381,9 @@ def run_label() -> Dict[str, str]:
     if not _run:
         import secrets  # noqa: PLC0415
 
-        given = (os.getenv(RUN_ID_ENV) or "").strip()[:64]
+        # Только `[A-Za-z0-9._:-]`, прочее — `_`, не длиннее 64: значение уходит в каждую
+        # запись и в сравнения, а приходит из чужого окружения.
+        given = re.sub(r"[^A-Za-z0-9._:-]", "_", (os.getenv(RUN_ID_ENV) or "").strip())[:64]
         _run["id"] = given or secrets.token_hex(6)
         _run["startedAt"] = _now()
     return dict(_run)
@@ -396,39 +499,66 @@ def validate(
     return problems
 
 
+def _run_id(record: Mapping[str, Any]) -> Optional[str]:
+    run = record.get("run")
+    ident = run.get("id") if isinstance(run, Mapping) else None
+    return ident if isinstance(ident, str) and ident else None
+
+
 def _started(record: Mapping[str, Any]) -> Optional[datetime]:
+    """Начало прогона записи. Чужой файл — недоверенный ввод: любое исключение разбора
+    (`OverflowError` у `0001-…` с поясом, `OSError` у `9999-…` на Windows) и время из
+    будущего (позже, чем через сутки от сейчас) — «без метки»."""
     run = record.get("run")
     stamp = run.get("startedAt") if isinstance(run, Mapping) else None
     if not isinstance(stamp, str):
         return None
     try:
         when = datetime.fromisoformat(stamp)
-    except ValueError:
+        when = when if when.tzinfo else when.astimezone()
+        if when > datetime.now(timezone.utc) + timedelta(days=1):
+            return None
+        when.astimezone(timezone.utc)  # переполнение на краях календаря — здесь, а не в сортировке
+    except Exception:
         return None
-    return when if when.tzinfo else when.astimezone()
+    return when
+
+
+def _link(record: Mapping[str, Any]) -> tuple:
+    """Связь, которую запись описывает: тест, таблица или топик, фаза."""
+    target = record.get("topic") if "topic" in record else (record.get("schema"), record.get("table"))
+    return (record.get("nodeid"), json.dumps(target, sort_keys=True, default=str), record.get("phase"))
 
 
 def keep_last_runs(records: List[dict], keep_runs: int) -> List[dict]:
-    """Записи последних *keep_runs* прогонов по ``run.startedAt``. ``0`` — все.
+    """Записи последних *keep_runs* прогонов **плюс** последняя запись каждой связи. ``0`` —
+    все.
 
-    Записи без метки (снятые до неё) считаются одним прогоном старше любого помеченного:
-    они уходят первыми. Порядок оставшихся не меняется.
+    **Прогон — это `run.id`.** Свежесть прогона — наибольший `run.startedAt` среди его
+    записей (время с поясом, не текст). Записи без метки — с непонятным или будущим
+    временем, без `id` — считаются одним прогоном старше любого помеченного.
+
+    Сверх последних прогонов остаётся последняя запись на каждую тройку (`nodeid`,
+    `схема.таблица` или топик, `phase`): иначе двадцать отладочных `pytest -k` вытеснили
+    бы связи всех остальных тестов, а связь теста с таблицей — то, что читатель строит.
+    Порядок оставшихся не меняется.
     """
     if keep_runs <= 0:
         return list(records)
     oldest = datetime.min.replace(tzinfo=timezone.utc)
-    runs: Dict[Any, datetime] = {}
+    fresh: Dict[Optional[str], datetime] = {}
     for record in records:
-        run = record.get("run")
-        ident = json.dumps(run, sort_keys=True, ensure_ascii=False) if isinstance(run, Mapping) else None
-        when = _started(record) or oldest
-        runs[ident] = max(runs.get(ident, oldest), when)
-    kept = set(sorted(runs, key=lambda i: runs[i], reverse=True)[:keep_runs])
-    return [
-        r for r in records
-        if (json.dumps(r["run"], sort_keys=True, ensure_ascii=False)
-            if isinstance(r.get("run"), Mapping) else None) in kept
-    ]
+        ident = _run_id(record)
+        when = _started(record) or oldest if ident is not None else oldest
+        fresh[ident] = max(fresh.get(ident, oldest), when, key=lambda d: d.astimezone(timezone.utc))
+    order = sorted(fresh, key=lambda i: (fresh[i].astimezone(timezone.utc), i is not None),
+                   reverse=True)
+    kept_runs = set(order[:keep_runs])
+    last_of_link: Dict[tuple, int] = {}
+    for index, record in enumerate(records):
+        last_of_link[_link(record)] = index
+    keep_index = set(last_of_link.values())
+    return [r for i, r in enumerate(records) if _run_id(r) in kept_runs or i in keep_index]
 
 
 def append_records(
@@ -453,7 +583,9 @@ def append_records(
         return
     path = Path(path)
     doc = read(path)
-    existing: List[dict] = list(doc.get(key) or []) if doc.get("kind") == kind else []
+    prior = doc.get(key) if isinstance(doc, dict) and doc.get("kind") == kind else None
+    # Чужой файл — недоверенный ввод: из прежнего берутся только записи-словари.
+    existing: List[dict] = [r for r in prior if isinstance(r, dict)] if isinstance(prior, list) else []
     seen = {json.dumps(r, sort_keys=True, ensure_ascii=False) for r in existing}
     # Маскировка — до сравнения: прежние записи уже прошли её при записи.
     for record in redact_payload(list(records)):
@@ -473,6 +605,7 @@ def discover_scopes(artifacts_dir: Path) -> List[Scope]:
     Раскладка — ``<artifacts_dir>/<система>/<контур>/<файл>``; порядок — по именам
     каталогов. Каталог без единого файла известного вида областью не считается.
     """
+    _refuse_unc(artifacts_dir, "artifacts_dir")
     known = set(KINDS.values())
     base = Path(artifacts_dir)
     out: List[Scope] = []
@@ -525,10 +658,12 @@ def inspect(path: Path, kind: str, *, scope: Optional[Scope] = None) -> Inspecti
     (:func:`validate`). Предупреждение, не расхождение: нет ключа полезной нагрузки — шапка
     сходится, а данных нет.
     """
+    filename(kind)  # неизвестный вид — ValueError всегда, а не только на найденном файле
+    _refuse_unc(path, "inspect")
     path = Path(path)
     if not path.is_file():
         return Inspection(kind, path, MISSING)
-    doc = read(path)
+    doc = _read_strict(path)
     if not isinstance(doc, dict) or not doc:
         return Inspection(kind, path, BROKEN, problems=[t(
             "файл есть, но не разбирается как JSON-объект (или пуст)",
@@ -592,7 +727,11 @@ __all__ = [
     "append_records",
     "discover_scopes",
     "filename",
+    "IDENTIFIER_KEYS",
+    "PayloadTooLarge",
     "inspect",
+    "is_secret_key",
+    "is_unc",
     "keep_last_runs",
     "redact_payload",
     "kind_of",

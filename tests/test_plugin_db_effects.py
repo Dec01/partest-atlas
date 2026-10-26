@@ -1009,3 +1009,65 @@ def test_a_bad_phases_value_leaves_the_plugin_off(monkeypatch, tmp_path, capsys,
     plugin.pytest_configure(ФейковыйConfigXdist())
     assert not plugin._active()
     assert "phases" in capsys.readouterr().out
+
+
+# --- сводный раунд 0.3.0: попытки повтора и битый файл ---------------------------------
+
+
+def test_a_rerun_attempt_is_its_own_record_not_a_duplicate(прогон, pytester):
+    """pytest-rerunfailures выставляет `item.execution_count`; здесь его ставит conftest,
+    чтобы не зависеть от установленного плагина (п. 12)."""
+    pytester.makeconftest("""
+def pytest_collection_modifyitems(items):
+    for item in items:
+        item.execution_count = 2
+""")
+    result, doc = прогон(
+        "artifacts_dir: atlas\n",
+        test_повтор="""
+import pytest
+from база import записать
+
+@pytest.mark.db_effects
+def test_a():
+    записать("orders")
+""",
+    )
+    result.assert_outcomes(passed=1)
+    assert [r.get("attempt") for r in doc["records"]] == [2]
+
+
+def test_a_broken_artifact_file_is_reported_not_an_internalerror(прогон, pytester):
+    """Каталог на месте `db_effects.json` — запись не удаётся; прогон цел (п. 6)."""
+    (pytester.path / "atlas" / "default" / "default" / "db_effects.json").mkdir(parents=True)
+    result, _ = прогон(
+        "artifacts_dir: atlas\n",
+        test_битый="""
+import pytest
+from база import записать
+
+@pytest.mark.db_effects
+def test_a():
+    записать("orders")
+""",
+    )
+    result.assert_outcomes(passed=1)
+    assert "INTERNALERROR" not in result.stdout.str()
+    result.stdout.fnmatch_lines(["*db_effects.json не записан*"])
+
+
+def test_phases_in_session_mode_print_one_line(прогон):
+    result, doc = прогон(
+        "artifacts_dir: atlas\ndb_effects:\n  phases: true\n  per_test_limit: 0\n",
+        test_сессия_фазы="""
+import pytest
+from база import записать
+
+@pytest.mark.db_effects
+def test_a():
+    записать("orders")
+""",
+    )
+    result.assert_outcomes(passed=1)
+    result.stdout.fnmatch_lines(["*phases: true, но режим session*фазы не пишутся*"])
+    assert all("phase" not in r for r in doc["records"])

@@ -167,7 +167,10 @@ def build(
                 "name": column["column_name"],
                 "type": short_type(column),
                 "nullable": column["is_nullable"] == "YES",
-                "default": (column.get("column_default") or "")[:DEFAULT_CLIP] or None,
+                # У колонки с секретным именем (`password`, `api_key`…) значение по
+                # умолчанию не пишется вовсе — только тип: литерал там и бывает секретом.
+                "default": None if artifacts.is_secret_key(column["column_name"])
+                else (column.get("column_default") or "")[:DEFAULT_CLIP] or None,
                 "pk": ident in pk_set,
                 "fk": fk_map.get(ident),
             }
@@ -206,8 +209,8 @@ def key_from(section: Mapping[str, Any]) -> str:
         return DEFAULT_KEY
     if not isinstance(raw, str) or not raw.strip():
         raise ValueError(t(
-            f"database.key={raw!r}: ожидалась непустая строка",
-            f"database.key={raw!r}: expected a non-empty string",
+            "database.key: ожидалась непустая строка",
+            "database.key: expected a non-empty string",
         ))
     return raw.strip()
 
@@ -268,11 +271,10 @@ def write(
     cfg = config or load()
     payload = collect(cfg, count_rows=count_rows)
     where = scope or cfg.scope
-    artifacts.write(
+    return artifacts.write(
         where.path(cfg.artifacts_dir, KIND),
         KIND,
         payload,
         scope=where,
         collector="partest-atlas/db_schema",
     )
-    return payload

@@ -53,15 +53,17 @@ def _iter_paths(raw: Sequence[str]) -> List[Path]:
     return out
 
 
-def _expected_scopes(raw: Sequence[str]) -> Dict[Path, Scope]:
+def _expected_scopes(raw: Sequence[str]) -> Dict[Path, Optional[Scope]]:
     """Область, которую файл обязан нести, — по каталогу, в котором он найден.
 
     Только для файлов, найденных в названном каталоге по раскладке
     ``<каталог>/<система>/<контур>/<файл>``: про файл, названный напрямую, или про файл
-    в корне каталога нельзя сказать, чья это область, и сверять её не с чем.
+    в корне каталога нельзя сказать, чья это область, и сверять её не с чем. Область —
+    через `artifacts.scope_of`; каталог не по правилу имени (`Система/x/`) — ``None``, и
+    `check` называет его расхождением, а не падает.
     """
     known = set(artifacts.KINDS.values())
-    out: Dict[Path, Scope] = {}
+    out: Dict[Path, Optional[Scope]] = {}
     for item in raw:
         base = Path(item)
         if not base.is_dir():
@@ -69,7 +71,7 @@ def _expected_scopes(raw: Sequence[str]) -> Dict[Path, Scope]:
         for path in base.rglob("*.json"):
             parts = path.relative_to(base).parts
             if path.name in known and len(parts) == 3:
-                out[path] = Scope(system=parts[0], env=parts[1])
+                out[path] = artifacts.scope_of(path)
     return out
 
 
@@ -89,21 +91,26 @@ def _cmd_check(paths: Sequence[str], *, as_json: bool) -> int:
         doc = artifacts.read(path)
         # Вид — по имени файла, область — по каталогу: файл схемы под именем эффектов и
         # файл чужого контура в этом каталоге — расхождения, а не годные данные.
-        problems = artifacts.validate(doc, kind=artifacts.kind_of(path), scope=scopes.get(path))
+        laid_out = path in scopes
+        expected = scopes.get(path)
+        problems = artifacts.validate(doc, kind=artifacts.kind_of(path), scope=expected)
+        if laid_out and expected is None:
+            problems.append(t(f"каталог области не по правилу: {artifacts.SCOPE_RULE_RU}",
+                              f"the scope directory breaks the rule: {artifacts.SCOPE_RULE_EN}"))
         if problems:
             failed += 1
         report.append({"path": str(path), "problems": problems})
 
     if as_json:
-        print(json.dumps(report, ensure_ascii=False, indent=1))
+        print(json.dumps(_printable_tree(report), ensure_ascii=False, indent=1))
     else:
         for item in report:
             if item["problems"]:
-                print(f"{t('РАСХОЖДЕНИЯ', 'PROBLEMS   ')}  {item['path']}")
+                print(f"{t('РАСХОЖДЕНИЯ', 'PROBLEMS   ')}  {_printable(item['path'])}")
                 for problem in item["problems"]:
-                    print(f"    · {problem}")
+                    print(f"    · {_printable(problem)}")
             else:
-                print(f"{t('сходится   ', 'conforms   ')} {item['path']}")
+                print(f"{t('сходится   ', 'conforms   ')} {_printable(item['path'])}")
         print(t(f"\nпрочитано файлов: {len(report)}, с расхождениями: {failed}",
                 f"\nfiles read: {len(report)}, with problems: {failed}"))
 
@@ -116,7 +123,7 @@ def _cmd_show(paths: Sequence[str], *, as_json: bool) -> int:
     # как успех. Существующие пути при этом всё равно показываются.
     missing = [p for p in paths if not Path(p).exists()]
     for path in missing:
-        print(t(f"нет такого пути: {path}", f"no such path: {path}"), file=sys.stderr)
+        print(_printable(t(f"нет такого пути: {path}", f"no such path: {path}")), file=sys.stderr)
     targets = _iter_paths([p for p in paths if p not in missing])
     if not targets:
         if not missing:
@@ -131,9 +138,10 @@ def _cmd_show(paths: Sequence[str], *, as_json: bool) -> int:
         if not isinstance(doc, dict) or not doc.get("kind"):
             # Пустой, битый или чужой JSON: `read` снисходителен и отдал бы его как есть,
             # а шапка из `None` с кодом 0 выдала бы его за показанный артефакт.
-            print(t(f"не артефакт (нет поля kind; пуст, битый или чужой JSON): {path}",
-                    f"not an artifact (no kind field; empty, broken or foreign JSON): {path}"),
-                  file=sys.stderr)
+            print(_printable(t(
+                f"не артефакт (нет поля kind; пуст, битый или чужой JSON): {path}",
+                f"not an artifact (no kind field; empty, broken or foreign JSON): {path}")),
+                file=sys.stderr)
             unreadable += 1
             continue
         # Списки записей — всё, что не служебная шапка: их размер и есть содержание.
@@ -154,21 +162,29 @@ def _cmd_show(paths: Sequence[str], *, as_json: bool) -> int:
         )
 
     if as_json:
-        print(json.dumps(rows, ensure_ascii=False, indent=1))
+        print(json.dumps(_printable_tree(rows), ensure_ascii=False, indent=1))
     else:
         for row in rows:
-            scope = row["scope"] or {}
-            print(f"{row['path']}")
-            print(t(
+            scope = row["scope"] if isinstance(row["scope"], dict) else None
+            print(_printable(row["path"]))
+            if scope is None:
+                # Шапка чужая или битая: `scope` не объект — сказать это, а не упасть.
+                print(_printable(t(
+                    f"    вид {row['kind']!r} · область в файле не объект ({type(row['scope']).__name__})",
+                    f"    kind {row['kind']!r} · the scope in the file is not an object "
+                    f"({type(row['scope']).__name__})",
+                )))
+                scope = {}
+            print(_printable(t(
                 f"    вид {row['kind']!r} · схема {row['version']} · "
                 f"область {scope.get('system')}/{scope.get('env')} · "
                 f"собрано {row['collected_at']} · сборщик {row['collector']!r}",
                 f"    kind {row['kind']!r} · schema {row['version']} · "
                 f"scope {scope.get('system')}/{scope.get('env')} · "
                 f"collected {row['collected_at']} · collector {row['collector']!r}",
-            ))
+            )))
             for key, size in (row["payload"] or {}).items():
-                print(f"    {key}: {size}")
+                print(_printable(f"    {key}: {size}"))
     return 1 if missing or unreadable else 0
 
 
@@ -201,9 +217,12 @@ def _scope_part(value: Optional[str], env_name: str, flag: str) -> str:
     печатается — оно из чужого окружения."""
     import os  # noqa: PLC0415
 
-    raw = value if value is not None else (os.getenv(env_name) or DEFAULT_SCOPE_KEY)
+    # Пустое значение — «не задано», как у сервера карты и у `ATLAS_SYSTEM=""` (договор
+    # `atlas-config`: одинаковые правила во всех командах обоих пакетов).
+    given = value if value else None
+    raw = given if given is not None else (os.getenv(env_name) or DEFAULT_SCOPE_KEY)
     if not artifacts.valid_scope_part(raw):
-        source = flag if value is not None else env_name
+        source = flag if given is not None else env_name
         raise _Refused(t(f"{source}: {artifacts.SCOPE_RULE_RU}", f"{source}: {artifacts.SCOPE_RULE_EN}"))
     return raw
 
@@ -244,13 +263,24 @@ def _one_line(exc: BaseException) -> str:
     return redact_text(text)
 
 
-#: Управляющие символы (C0, DEL, C1) — то, что в строке из чужой спецификации может
-#: переписать терминал или журнал (ESC-последовательности).
-_CONTROL = {c: "?" for c in [*range(0x00, 0x20), *range(0x7F, 0xA0)]}
-
-
 def _printable(text: Any) -> str:
-    return str(text).translate(_CONTROL)
+    """Строка без управляющих (категория Cc: C0, DEL, C1 — ESC-последовательности) и
+    форматирующих символов (Cf: U+202E переворачивает строку в терминале и журнале) — они
+    печатаются как `?`. Строки из чужой спецификации и чужих файлов идут только так."""
+    import unicodedata  # noqa: PLC0415
+
+    return "".join("?" if unicodedata.category(c) in ("Cc", "Cf") else c for c in str(text))
+
+
+def _printable_tree(value: Any) -> Any:
+    """То же для отчёта `--json`: строки — значения и ключи."""
+    if isinstance(value, str):
+        return _printable(value)
+    if isinstance(value, dict):
+        return {(_printable(k) if isinstance(k, str) else k): _printable_tree(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_printable_tree(v) for v in value]
+    return value
 
 
 def _summary(what: str, payload: Dict[str, Any]) -> str:
@@ -295,62 +325,121 @@ def _summary_text(what: str, payload: Dict[str, Any]) -> str:
     )
 
 
-def _cmd_collect(args: argparse.Namespace, *, as_json: bool) -> int:
-    from partest_atlas import config  # noqa: PLC0415
+#: Подкоманды `collect` в порядке, в котором их собирает голый `collect`.
+COLLECTORS = ("openapi", "db-schema", "container-logs")
+
+
+def _module(what: str) -> Any:
     from partest_atlas.collect import container_logs, db_schema, openapi  # noqa: PLC0415
 
-    collectors = {
-        "openapi": openapi,
-        "db-schema": db_schema,
-        "container-logs": container_logs,
+    return {"openapi": openapi, "db-schema": db_schema, "container-logs": container_logs}[what]
+
+
+def _configured(what: str, cfg: Any, root: Optional[Path]) -> bool:
+    """Настроен ли сборщик: `confpartest.py` в каталоге проекта, раздел `database`, раздел
+    `container_logs`. Голый `collect` ненастроенное пропускает, а не роняет."""
+    if what == "openapi":
+        return ((root or cfg.root) / "confpartest.py").is_file()
+    if what == "db-schema":
+        return "database" in cfg.raw
+    return "container_logs" in cfg.raw
+
+
+def _collect_one(what: str, args: argparse.Namespace, cfg: Any, root: Optional[Path],
+                 scope: Scope) -> Dict[str, Any]:
+    """Снять одно наблюдение. Возвращает записанное (замаскированное) содержание."""
+    notes: List[str] = []
+    try:
+        if what == "openapi":
+            payload = _module(what).write(cfg, root=root, service=getattr(args, "service", None),
+                                          scope=scope, notes=notes)
+        else:
+            _project_on_path(cfg.root)
+            payload = _module(what).write(cfg, scope=scope)
+    finally:
+        for note in notes:
+            print(f"[atlas] collect {what}: {_printable(note)}", file=sys.stderr)
+    return payload
+
+
+def _report(what: str, scope: Scope, cfg: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    module = _module(what)
+    return {
+        "kind": module.KIND,
+        "path": str(scope.path(cfg.artifacts_dir, module.KIND)),
+        "scope": scope.as_dict(),
+        "stats": payload.get("stats"),
+        **({"info": payload["info"]} if "info" in payload else {}),
+        **({"source": payload["source"]} if "source" in payload else {}),
+        **({"services": [s.get("service") for s in payload["services"]]}
+           if "services" in payload else {}),
     }
-    module = collectors[args.what]
-    root = Path(args.root).resolve() if args.root else None
+
+
+def _cmd_collect(args: argparse.Namespace, *, as_json: bool) -> int:
+    """`collect <что>` — одно наблюдение; голый `collect` — всё настроенное.
+
+    Печатается то, что записано (после `partest.redact`), а не исходное: заголовок
+    спецификации с `password=…` иначе ушёл бы в журнал конвейера, минуя маскировку.
+    Неудача — одна строка в stderr и код 1; с `--json` в stdout — `{"error": …}`.
+    """
+    from partest_atlas import config  # noqa: PLC0415
+
+    single = args.what
+    label = f"collect {single}" if single else "collect"
+    root_arg = getattr(args, "root", None)
+    root = Path(root_arg).resolve() if root_arg else None
+
+    def fail(what_label: str, exc: BaseException) -> Dict[str, Any]:
+        reason = _one_line(exc)
+        print(_printable(f"partest-atlas {what_label}: {reason}"), file=sys.stderr)
+        return {"error": _printable(reason)}
+
     try:
         if root is not None and not root.is_dir():
-            raise _Refused(t(f"--root {args.root}: нет такого каталога",
-                             f"--root {args.root}: no such directory"))
+            raise _Refused(t(f"--root {root_arg}: нет такого каталога",
+                             f"--root {root_arg}: no such directory"))
         cfg = config.load(root)
         scope = Scope(
-            system=_scope_part(args.system, "ATLAS_SYSTEM", "--system"),
-            env=_scope_part(args.env, "ATLAS_ENV", "--env"),
+            system=_scope_part(getattr(args, "system", None), "ATLAS_SYSTEM", "--system"),
+            env=_scope_part(getattr(args, "env", None), "ATLAS_ENV", "--env"),
         )
         for key in cfg.unknown_keys():
             # Договор `atlas-config`: неизвестный ключ своего раздела называется. Сбор не
             # останавливается — опечатка оставила бы умолчание, но не испортила бы запись.
             print(t(f"[atlas] atlas.yaml: неизвестный ключ {key} — не читается",
                     f"[atlas] atlas.yaml: unknown key {key} — not read"), file=sys.stderr)
-        notes: List[str] = []
-        if args.what == "openapi":
-            payload = openapi.write(cfg, root=root, service=args.service, scope=scope, notes=notes)
-        else:
-            _project_on_path(cfg.root)
-            payload = module.write(cfg, scope=scope)
     except Exception as exc:
-        print(f"partest-atlas collect {args.what}: {_one_line(exc)}", file=sys.stderr)
+        error = fail(label, exc)
+        if as_json:
+            print(json.dumps(error, ensure_ascii=False))
         return EXIT_COLLECT_FAILED
-    for note in notes:
-        print(f"[atlas] collect {args.what}: {_printable(note)}", file=sys.stderr)
 
-    path = scope.path(cfg.artifacts_dir, module.KIND)
+    whats = [single] if single else list(COLLECTORS)
+    results: List[Dict[str, Any]] = []
+    failed = False
+    for what in whats:
+        if not single and not _configured(what, cfg, root):
+            print(t(f"[atlas] collect: {what} не настроен — пропущено",
+                    f"[atlas] collect: {what} is not configured — skipped"), file=sys.stderr)
+            continue
+        try:
+            payload = _collect_one(what, args, cfg, root, scope)
+        except Exception as exc:
+            failed = True
+            results.append({"collector": what, **fail(f"collect {what}", exc)})
+            continue
+        report = _report(what, scope, cfg, payload)
+        results.append({"collector": what, **report})
+        if not as_json:
+            print(f"{report['kind']}: {_summary(what, payload)} -> {_printable(report['path'])}")
+
     if as_json:
-        print(json.dumps(
-            {
-                "kind": module.KIND,
-                "path": str(path),
-                "scope": scope.as_dict(),
-                "stats": payload.get("stats"),
-                **({"info": payload["info"]} if "info" in payload else {}),
-                **({"source": payload["source"]} if "source" in payload else {}),
-                **({"services": [s.get("service") for s in payload["services"]]}
-                   if "services" in payload else {}),
-            },
-            ensure_ascii=False,
-            indent=1,
-        ))
-    else:
-        print(f"{module.KIND}: {_summary(args.what, payload)} -> {path}")
-    return 0
+        body: Any = results[0] if single and results else {"results": results}
+        if single and results:
+            body = {k: v for k, v in body.items() if k != "collector"}
+        print(json.dumps(_printable_tree(body), ensure_ascii=False, indent=1))
+    return EXIT_COLLECT_FAILED if failed else 0
 
 
 # --- разбор аргументов -----------------------------------------------------------------
@@ -417,31 +506,47 @@ def _parser() -> argparse.ArgumentParser:
     p_wrap.add_argument("rest", nargs=argparse.REMAINDER,
                         help=t("-- и сама команда", "-- and the command itself"))
 
-    common = argparse.ArgumentParser(add_help=False)
-    common.add_argument(
-        "--root",
-        help=t("каталог проекта: от него ищется atlas.yaml (и confpartest.py для openapi); "
-               "по умолчанию — текущий",
-               "project directory: atlas.yaml (and confpartest.py for openapi) is looked up "
-               "from it; the current one by default"),
-    )
-    common.add_argument("--system", help=t("система; по умолчанию ATLAS_SYSTEM или default",
-                                           "system; ATLAS_SYSTEM or default by default"))
-    common.add_argument("--env", help=t("контур; по умолчанию ATLAS_ENV или default",
-                                        "environment; ATLAS_ENV or default by default"))
+    def common_options(suppress: bool) -> argparse.ArgumentParser:
+        # У подкоманды умолчание — SUPPRESS: иначе её `None` затёр бы значение, заданное
+        # у голого `collect` (`collect --root R openapi`).
+        kw = {"default": argparse.SUPPRESS} if suppress else {}
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument(
+            "--root", **kw,
+            help=t("каталог проекта: от него ищется atlas.yaml (и confpartest.py для openapi); "
+                   "по умолчанию — текущий",
+                   "project directory: atlas.yaml (and confpartest.py for openapi) is looked up "
+                   "from it; the current one by default"),
+        )
+        parser.add_argument("--system", **kw,
+                            help=t("система; по умолчанию ATLAS_SYSTEM или default; пусто — не задано",
+                                   "system; ATLAS_SYSTEM or default by default; empty — not set"))
+        parser.add_argument("--env", **kw,
+                            help=t("контур; по умолчанию ATLAS_ENV или default; пусто — не задано",
+                                   "environment; ATLAS_ENV or default by default; empty — not set"))
+        return parser
+
+    common = common_options(suppress=True)
 
     p_collect = sub.add_parser(
         "collect",
+        parents=[common_options(suppress=False)],
         help=t("снять наблюдение без прогона тестов и записать артефакт",
                "collect an observation that needs no test run and write the artifact"),
         description=t(
-            "Пишет только в <artifacts_dir>/<система>/<контур>/. Неудача — одна строка в "
-            "stderr и код 1; артефакт тогда не пишется.",
-            "Writes only to <artifacts_dir>/<system>/<env>/. A failure is one line on "
-            "stderr and exit code 1; no artifact is written then.",
+            "Пишет только в <artifacts_dir>/<система>/<контур>/. Без подкоманды — всё "
+            "настроенное (openapi, если есть confpartest.py; db-schema, если есть раздел "
+            "database; container-logs, если есть раздел container_logs), ненастроенное "
+            "пропускается одной строкой. Неудача — одна строка в stderr и код 1; артефакт "
+            "тогда не пишется.",
+            "Writes only to <artifacts_dir>/<system>/<env>/. Without a subcommand — "
+            "everything configured (openapi if there is confpartest.py; db-schema if there is "
+            "a database section; container-logs if there is a container_logs section), the "
+            "rest is skipped with one line. A failure is one line on stderr and exit code 1; "
+            "no artifact is written then.",
         ),
     )
-    what = p_collect.add_subparsers(dest="what", required=True)
+    what = p_collect.add_subparsers(dest="what", required=False)
     p_openapi = what.add_parser(
         "openapi",
         parents=[common],
@@ -462,8 +567,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     p_openapi.add_argument(
         "--service",
-        help=t("ключ в swagger_files: обновить только эту службу",
-               "key in swagger_files: update this service only"),
+        help=t("ключ в swagger_files: обновить только эту службу. Два вызова с разными "
+               "--service одной области одновременно теряют службу — собирайте все службы "
+               "одним вызовом без --service или по очереди",
+               "key in swagger_files: update this service only. Two concurrent calls with "
+               "different --service for one scope lose a service — collect every service "
+               "in one call without --service, or one after another"),
     )
     what.add_parser(
         "db-schema",
@@ -480,22 +589,35 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _tolerant_stdout() -> None:
+def _tolerant_stdout() -> Optional[Any]:
     """Вывод в перенаправленный поток на Windows идёт в кодовой странице ANSI, и знак,
     которого в ней нет (кириллица под `--lang en` на cp1252), ронял команду **после**
-    записи артефакта. Неотображаемое — экранируется, как у stderr по умолчанию."""
-    for stream in (sys.stdout,):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is not None:
-            try:
-                reconfigure(errors="backslashreplace")
-            except Exception:  # pragma: no cover - чужой поток (pytest capture и т. п.)
-                pass
+    записи артефакта. Неотображаемое — экранируется, как у stderr по умолчанию.
+
+    Возвращает, как вернуть прежнее (``main`` возвращает после вызова): код, позвавший
+    `main` сам, получает свой поток таким, каким отдал."""
+    stream = sys.stdout
+    reconfigure = getattr(stream, "reconfigure", None)
+    previous = getattr(stream, "errors", None)
+    if reconfigure is None or previous is None:
+        return None
+    try:
+        reconfigure(errors="backslashreplace")
+    except Exception:  # pragma: no cover - чужой поток (pytest capture и т. п.)
+        return None
+
+    def restore() -> None:
+        try:
+            reconfigure(errors=previous)
+        except Exception:  # pragma: no cover
+            pass
+
+    return restore
 
 
 def main(argv: Iterable[str] | None = None) -> int:
     raw = list(argv) if argv is not None else sys.argv[1:]
-    _tolerant_stdout()
+    restore_stdout = _tolerant_stdout()
     previous = lang.current()
     # Язык — на время вызова: код, который зовёт функции пакета сам, получает прежний.
     lang.set_lang(_pre_lang(raw) or lang.detect())
@@ -503,6 +625,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         return _main(raw)
     finally:
         lang.set_lang(previous)
+        if restore_stdout is not None:
+            restore_stdout()
 
 
 def _main(raw: List[str]) -> int:

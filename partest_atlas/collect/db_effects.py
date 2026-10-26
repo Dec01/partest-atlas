@@ -185,6 +185,10 @@ class DbEffects:
         after = self.snapshot()
         return after, max(self._sessions_before, self.active_sessions()) > 0
 
+    def drop_phases(self) -> None:
+        """Забыть дельты фаз: окно закончится одной дельтой от снимка «до»."""
+        self._phased = []
+
     def checkpoint(self, phase: str, *, test: str = "", nodeid: str = "") -> None:
         """Граница фазы окна: выдержка, снимок и дельта фазы с прошлой границы.
 

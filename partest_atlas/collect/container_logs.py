@@ -302,11 +302,10 @@ def write(config: Optional[Config] = None, *, scope: Optional[Scope] = None) -> 
     cfg = config or load()
     where = scope or cfg.scope
     payload = collect(cfg, scope=where)
-    artifacts.write(
+    return artifacts.write(
         where.path(cfg.artifacts_dir, KIND),
         KIND,
         payload,
         scope=where,
         collector="partest-atlas/container_logs",
     )
-    return payload

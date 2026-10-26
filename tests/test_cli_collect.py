@@ -108,7 +108,8 @@ def test_openapi_from_a_local_spec_writes_the_contract(проект, запус�
     assert doc["stats"]["operations"] == 2
     assert doc["info"] == {"title": "Магазин", "version": "1.4.0"}
     # Путь — как объявлен, а не разрешённый: полный путь на машине сборки карте не нужен.
-    assert doc["source"] == {"service": "магазин", "type": "local", "location": "spec/openapi.json"}
+    assert doc["source"] == {"service": "магазин", "type": "local", "location": "spec/openapi.json",
+                             "resolvedFrom": "confpartest"}
     assert "contract.openapi" in out and "операций 2" in out
 
 

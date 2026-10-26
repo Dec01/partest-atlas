@@ -88,12 +88,14 @@ atlas/<система>/<контур>/ui_flow.json
 ## Наблюдения без прогона
 
 ```bash
-partest-atlas collect openapi        # контракт из confpartest.swagger_files
+partest-atlas collect                # всё настроенное, ненастроенное пропускается
+partest-atlas collect openapi        # контракт из confpartest.swagger_files, все службы
 partest-atlas collect db-schema      # схема базы из раздела database, только чтение
 partest-atlas collect container-logs # связи из журналов, если объявлен container_logs.source
 ```
 
-Артефакт ложится в `<artifacts_dir>/<система>/<контур>/`; неудача — одна строка и код 2.
+Артефакт ложится в `<artifacts_dir>/<система>/<контур>/`; неудача — одна строка и код 1
+(2 — только ошибка разбора аргументов).
 Язык вывода — `--lang ru|en` или по локали. Подробно — `docs/wiki/components/collect.md`.
 
 Маркера трассируемости требований (`@pytest.mark.req`) нет ни здесь, ни в partest. По

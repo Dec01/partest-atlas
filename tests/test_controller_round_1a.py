@@ -272,7 +272,8 @@ def test_keep_runs_compares_times_not_strings():
 
 
 def test_unlabelled_records_go_first_and_zero_keeps_everything():
-    records = [{"table": "old"}, _record("a", "2026-01-01T00:00:00+00:00")]
+    # Одна и та же связь (таблица `t`): старую запись не держит и правило «последняя на связь».
+    records = [{"table": "t"}, _record("a", "2026-01-01T00:00:00+00:00")]
     assert artifacts.keep_last_runs(records, 1) == [records[1]]
     assert artifacts.keep_last_runs(records, 0) == records
 

@@ -202,6 +202,7 @@ def pytest_configure(config) -> None:
             "[atlas] db_effects: под pytest-xdist мерится только дельта сессии на "
             "контроллере, режим test выключен"
         )
+        _phases_unused("pytest-xdist")
 
 
 def pytest_collection_finish(session) -> None:
@@ -230,9 +231,15 @@ def pytest_collection_finish(session) -> None:
               "дельта всего прогона без маркеров — ATLAS_DB_EFFECTS_ALL=1")
         return
     if _state["mode"] == db_effects.SESSION:
+        _phases_unused("режим session")
         _open_session_probe()
     else:
         _state["remaining"] = len(wanted)
+
+
+def _phases_unused(why: str) -> None:
+    if _state.get("phases"):
+        print(f"[atlas] db_effects: phases: true, но {why} — фазы не пишутся, одна дельта на прогон")
 
 
 def pytest_sessionstart(session) -> None:  # noqa: ARG001
@@ -261,10 +268,15 @@ def pytest_runtest_protocol(item, nextitem):  # noqa: ARG001
     _state["prev_measured"] = probe is not None
     if probe is not None:
         try:
-            _state.setdefault("records", []).extend(probe.finish(
+            rows = probe.finish(
                 test=item.name, nodeid=item.nodeid,
                 phase="teardown" if phased is not None else None,
-            ))
+            )
+            attempt = int(getattr(item, "execution_count", 1) or 1)
+            if attempt > 1:
+                # pytest-rerunfailures: повтор — отдельная попытка, а не повтор записи.
+                rows = [{**r, "attempt": attempt} for r in rows]
+            _state.setdefault("records", []).extend(rows)
         except Exception as exc:  # pragma: no cover - зависит от стенда
             _note(f"снимок «после» теста {item.nodeid} не снялся ({type(exc).__name__}: {exc})")
     if "remaining" in _state and item.nodeid in (_state.get("wanted") or ()):
@@ -282,9 +294,13 @@ def _phase_boundary(item, phase: str) -> None:
         return
     try:
         phased[1].checkpoint(phase, test=item.name, nodeid=item.nodeid)
-    except Exception as exc:  # pragma: no cover - зависит от стенда
+    except Exception as exc:
+        # Граница не снялась: фазы у этого окна больше нет. Окно заканчивается одной
+        # дельтой без фазы — иначе эффект этой фазы достался бы следующей.
+        _state.pop("phased", None)
+        phased[1].drop_phases()
         _note(f"снимок после фазы {phase} теста {item.nodeid} не снялся "
-              f"({type(exc).__name__}: {exc})")
+              f"({type(exc).__name__}: {exc}) — окно без фаз")
 
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
@@ -433,15 +449,20 @@ def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ARG001
         return
 
     path = cfg.path_for(db_effects.KIND)
-    artifacts.append_records(
-        path,
-        db_effects.KIND,
-        "records",
-        records,
-        scope=cfg.scope,
-        collector="partest-atlas/db_effects",
-        keep_runs=_state.get("keep_runs", DEFAULT_KEEP_RUNS),
-    )
+    try:
+        artifacts.append_records(
+            path,
+            db_effects.KIND,
+            "records",
+            records,
+            scope=cfg.scope,
+            collector="partest-atlas/db_effects",
+            keep_runs=_state.get("keep_runs", DEFAULT_KEEP_RUNS),
+        )
+    except Exception as exc:
+        # Битый или чужой файл не должен давать INTERNALERROR на каждом прогоне.
+        _note(f"{path.name} не записан ({type(exc).__name__}: {exc})")
+        return
     tables = {r["table"] for r in records}
     print(
         f"[atlas] db_effects: режим {_state.get('mode')}, записей {len(records)}, "

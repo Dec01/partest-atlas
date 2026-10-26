@@ -78,6 +78,8 @@ def pytest_configure(config) -> None:
         )
         keep_runs = non_negative(section, "keep_runs", DEFAULT_KEEP_RUNS, int, where=MARKER)
         cfg.scope  # noqa: B018 — негодная область — сейчас, а не INTERNALERROR в конце
+        for key in cfg.unknown_keys():
+            print(f"[atlas] atlas.yaml: неизвестный ключ {key} — не читается")
     except Exception as exc:
         _note(f"{type(exc).__name__}: {exc}", misconfigured=True)
         # Строка `note` в состоянии — не включённый плагин: дальше хуки шли бы в
@@ -151,11 +153,16 @@ def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ARG001
         return
 
     path = cfg.path_for(bus_flow.KIND)
-    artifacts.append_records(
-        path, bus_flow.KIND, "records", records,
-        scope=cfg.scope, collector="partest-atlas/bus_flow",
-        keep_runs=_state.get("keep_runs", DEFAULT_KEEP_RUNS),
-    )
+    try:
+        artifacts.append_records(
+            path, bus_flow.KIND, "records", records,
+            scope=cfg.scope, collector="partest-atlas/bus_flow",
+            keep_runs=_state.get("keep_runs", DEFAULT_KEEP_RUNS),
+        )
+    except Exception as exc:
+        # Битый или чужой файл не должен давать INTERNALERROR на каждом прогоне.
+        _note(f"{path.name} не записан ({type(exc).__name__}: {exc})")
+        return
     print(
         f"[atlas] bus_flow: записей {len(records)}, "
         f"топиков {len({r['topic'] for r in records})} -> {path}"

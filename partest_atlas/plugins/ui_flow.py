@@ -17,7 +17,7 @@ import pytest
 
 from partest_atlas import artifacts
 from partest_atlas.collect import ui_flow
-from partest_atlas.config import Config, load
+from partest_atlas.config import Config, load, non_negative
 
 ENABLE_ENV = "ATLAS_UI_FLOW"
 MARKER = "ui_flow"
@@ -36,13 +36,18 @@ def pytest_configure(config) -> None:
         return
     try:
         cfg: Config = load()
+        section = cfg.section(MARKER)
+        window_ms = int(non_negative(section, "window_ms", ui_flow.DEFAULT_WINDOW_MS, int,
+                                     where=MARKER) or ui_flow.DEFAULT_WINDOW_MS)
+        cfg.scope  # noqa: B018 — негодная область — сейчас, а не в конце прогона
     except Exception as exc:
         print(f"[atlas] ui_flow ВЫКЛЮЧЕН ОШИБКОЙ КОНФИГУРАЦИИ — чинить здесь: {exc}")
         return
-    section = cfg.section(MARKER)
+    for key in cfg.unknown_keys():
+        print(f"[atlas] atlas.yaml: неизвестный ключ {key} — не читается")
     _state.update(
         config=cfg,
-        window_ms=int(section.get("window_ms") or ui_flow.DEFAULT_WINDOW_MS),
+        window_ms=window_ms,
         ignore_url=list(section.get("ignore_url") or []),
         ignore_control=list(section.get("ignore_control") or []),
         links=[],

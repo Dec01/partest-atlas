@@ -12,6 +12,19 @@ allow_version_literals: true
 Хронология: что сделано с документацией и почему. Новые записи сверху.
 Формат строки: дата · операция (ingest / update / lint / restructure) · что затронуто.
 
+## 2026-10-26 · update · сводный раунд контролёров по кандидату 0.3.0 (не выпущено)
+
+[[components/artifacts]] — `fullmatch`, UNC в любом написании, правила маскировки (секретные
+ключи, идентификаторы, совпавшие ключи, бюджет), `keep_runs`: прогон — `run.id`, плюс
+последняя запись связи, `attempt`, строгий `inspect`. [[components/collect]] — голый
+`collect`, печать записанного без Cc/Cf, `--json` с `error`, службы (`collectedAt`, порядок,
+убранные службы, параллельные вызовы), `resolvedFrom`, потолки разбора, пустая область.
+[[components/overview]] — `KNOWN_KEYS`, `keep_runs`, `attempt`, сбой границы фазы, фазы в
+`session`, неизвестные ключи у всех плагинов; `sources` + `collect/db_effects.py`.
+[[howto/prepare-a-project]] — шаги сведены с таблицей, все переменные, первый запуск с
+`ATLAS_DB_EFFECTS_ALL=1`, разделы `database`/`bus_flow`, `veha init`, ключи `project` не
+читаются. [[status]], [[proposals]] — T, U, V.
+
 ## 2026-10-26 · update · код выхода `collect` и поправки к partest 2.8 (не выпущено)
 
 [[components/collect]], [[components/overview]], [[howto/prepare-a-project]] — `collect` на «не снято» отдаёт 1, 
