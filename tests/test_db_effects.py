@@ -207,3 +207,44 @@ def test_every_snapshot_query_runs_in_its_own_read_only_transaction():
         elif sql.startswith("SELECT"):
             assert блок, f"выборка вне транзакции только на чтение: {sql[:50]}"
     assert conn.запросы.count(postgres.CHECK_READ_ONLY_SQL) == 4  # два снимка, два счёта сессий
+
+
+# --- метка прогона и фазы окна -----------------------------------------------------
+
+
+def test_the_run_label_travels_with_every_record():
+    метка = {"id": "r1", "startedAt": "2026-01-01T00:00:00+00:00"}
+    conn = ПоддельноеСоединение([snap(t=(0, 0, 0)), snap(t=(2, 0, 0))])
+    rows = db_effects.open_effects(conn, ["public"], run=метка).finish()
+    assert rows[0]["run"] == метка
+    assert "phase" not in rows[0]
+
+
+def test_without_a_label_the_record_is_as_before():
+    rows = diff(snap(t=(0, 0, 0)), snap(t=(1, 0, 0)))
+    assert "run" not in rows[0] and "phase" not in rows[0]
+
+
+def test_phases_split_the_window_into_their_own_deltas():
+    """Фикстура записала на подготовке, тест — в вызове, уборка удалила: у каждой фазы
+    своя дельта, и эффект фикстуры не приписан самому тесту."""
+    conn = ПоддельноеСоединение([
+        snap(t=(0, 0, 0)),   # «до»
+        snap(t=(1, 0, 0)),   # после setup
+        snap(t=(3, 0, 0)),   # после call
+        snap(t=(3, 0, 1)),   # после teardown
+    ])
+    effects = db_effects.open_effects(conn, ["public"], scope=db_effects.TEST)
+    effects.checkpoint("setup", test="t", nodeid="n")
+    effects.checkpoint("call", test="t", nodeid="n")
+    rows = effects.finish(test="t", nodeid="n", phase="teardown")
+    assert [(r["phase"], r["insert"], r["delete"]) for r in rows] == [
+        ("setup", 1, 0), ("call", 2, 0), ("teardown", 0, 1),
+    ]
+
+
+def test_a_phase_without_changes_writes_nothing():
+    conn = ПоддельноеСоединение([snap(t=(0, 0, 0)), snap(t=(0, 0, 0)), snap(t=(1, 0, 0))])
+    effects = db_effects.open_effects(conn, ["public"], scope=db_effects.TEST)
+    effects.checkpoint("setup")
+    assert [r["phase"] for r in effects.finish(phase="call")] == ["call"]

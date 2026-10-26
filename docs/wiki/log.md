@@ -1,7 +1,7 @@
 ---
 title: Журнал операций над документацией
 status: current
-verified: 2026-09-07
+verified: 2026-10-26
 sources: []
 audience: maintainer
 allow_version_literals: true
@@ -11,6 +11,18 @@ allow_version_literals: true
 
 Хронология: что сделано с документацией и почему. Новые записи сверху.
 Формат строки: дата · операция (ingest / update / lint / restructure) · что затронуто.
+
+## 2026-10-26 · update · набор формата от Вехи (не выпущено)
+
+[[components/artifacts]] — публичные имена `artifacts`, `collected_at`, ключи полезной
+нагрузки, аддитивные поля (`run`, `phase`, `logs`, `screen`), сверка области с каталогом,
+`inspect`/`discover_scopes`, «версия 1 не годится как данные» вместо «читается без
+миграции». [[components/overview]] — публичный экспорт трёх модулей, метка прогона и фазы
+`db_effects`, нормализация экрана. [[components/history]] — записи `runs` непрозрачны как
+часть контракта, `__all__`. [[components/collect]] — `logs` у `containers.logs`.
+[[howto/prepare-a-project]] — что ещё сверяет `check`. [[status]] — строка «Не выпущено»,
+685 проверок, п. 9 закрыт, отложенное до схемы 3. [[proposals]] — E принято; H — команда
+`python -m partest.reports compare`.
 
 ## 2026-10-25 · ingest · сборщики из командной строки (не выпущено)
 

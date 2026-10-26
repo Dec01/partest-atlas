@@ -216,3 +216,10 @@ def test_the_clock_is_read_before_the_settle(monkeypatch):
     r = ПоддельныйЧитатель([{"т": {0: 0}}, {"т": {0: 1}}])
     bus_flow.open_flow(r, ["т"], settle_sec=1.0).finish()
     assert порядок == ["часы", "сон"]
+
+
+def test_the_run_label_travels_with_every_bus_record():
+    метка = {"id": "r1", "startedAt": "2026-01-01T00:00:00+00:00"}
+    rows = diff_offsets({"t": {0: 1}}, {"t": {0: 3}}, run=метка)
+    assert rows[0]["run"] == метка
+    assert "run" not in diff_offsets({"t": {0: 1}}, {"t": {0: 3}})[0]

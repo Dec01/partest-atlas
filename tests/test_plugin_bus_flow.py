@@ -178,3 +178,5 @@ def test_b():
     ]
     assert doc["records"][0]["afterWrite"] is False
     assert doc["records"][0]["http"] == {"requests": 0, "writes": 0}
+    # Метка прогона — та же, что у `db_effects` в этом процессе.
+    assert doc["records"][0]["run"] == artifacts.run_label()

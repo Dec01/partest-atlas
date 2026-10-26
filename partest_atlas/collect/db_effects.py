@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from partest_atlas.adapters.postgres import read_only
 
@@ -66,8 +66,14 @@ def diff(
     nodeid: str = "",
     shared: bool = False,
     scope: str = SESSION,
+    run: Optional[Mapping[str, Any]] = None,
+    phase: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Дельта двух снимков счётчиков. Таблицы без изменений не попадают в вывод.
+
+    *run* — метка прогона (:func:`partest_atlas.artifacts.run_label`), пишется ключом
+    ``run``; *phase* — фаза окна теста (``setup``/``call``/``teardown``), ключом
+    ``phase``. Не переданы — ключей нет, запись как раньше.
 
     Таблица, которой не было в первом снимке, **пропускается**: у неё нет «до», и
     разность считать не от чего. Записать её целиком было бы неверно — счётчики там
@@ -85,18 +91,21 @@ def diff(
         deleted = int(now["del"]) - int(was["del"])
         if not (inserted or updated or deleted):
             continue
-        out.append(
-            {
-                "test": test,
-                "nodeid": nodeid,
-                "table": table,
-                "insert": inserted,
-                "update": updated,
-                "delete": deleted,
-                "shared": shared,
-                "scope": scope,
-            }
-        )
+        record: Dict[str, Any] = {
+            "test": test,
+            "nodeid": nodeid,
+            "table": table,
+            "insert": inserted,
+            "update": updated,
+            "delete": deleted,
+            "shared": shared,
+            "scope": scope,
+        }
+        if run is not None:
+            record["run"] = dict(run)
+        if phase is not None:
+            record["phase"] = phase
+        out.append(record)
     return out
 
 
@@ -108,8 +117,11 @@ class DbEffects:
     schemas: List[str] = field(default_factory=lambda: ["public"])
     settle_sec: float = 0.0
     scope: str = SESSION
+    run: Optional[Dict[str, Any]] = None
     _before: Dict[str, dict] = field(default_factory=dict)
     _sessions_before: int = 0
+    _last: Dict[str, dict] = field(default_factory=dict)
+    _phased: List[Dict[str, Any]] = field(default_factory=list)
 
     def _rollback(self) -> None:
         try:
@@ -144,19 +156,49 @@ class DbEffects:
 
     def start(self) -> "DbEffects":
         self._before = self.snapshot()
+        self._last = self._before
         self._sessions_before = self.active_sessions()
         return self
 
-    def finish(self, *, test: str = "", nodeid: str = "") -> List[Dict[str, Any]]:
+    @property
+    def tables(self) -> List[str]:
+        """Таблицы, которые видел снимок «до». Пусто — схемы выбраны не те."""
+        return sorted(self._before)
+
+    def _settled_snapshot(self) -> Tuple[Dict[str, dict], bool]:
         if self.settle_sec:
             # Выдержка безусловная: проверка «изменилось ли хоть что-нибудь» бесполезна —
             # на общем стенде посторонняя активность меняет какую-нибудь таблицу почти
             # всегда, и снимок брался бы раньше, чем долетал счётчик нужной.
             time.sleep(self.settle_sec)
         after = self.snapshot()
-        shared = max(self._sessions_before, self.active_sessions()) > 0
+        return after, max(self._sessions_before, self.active_sessions()) > 0
+
+    def checkpoint(self, phase: str, *, test: str = "", nodeid: str = "") -> None:
+        """Граница фазы окна: выдержка, снимок и дельта фазы с прошлой границы.
+
+        Записи копятся и отдаются :meth:`finish` вместе с последней фазой.
+        """
+        after, shared = self._settled_snapshot()
+        self._phased.extend(diff(
+            self._last, after, test=test, nodeid=nodeid, shared=shared, scope=self.scope,
+            run=self.run, phase=phase,
+        ))
+        self._last = after
+
+    def finish(
+        self, *, test: str = "", nodeid: str = "", phase: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Последний снимок и дельта. С *phase* — дельта последней фазы и все накопленные
+        :meth:`checkpoint`; без — одна дельта на всё окно, как раньше."""
+        if phase is not None:
+            self.checkpoint(phase, test=test, nodeid=nodeid)
+            out, self._phased = self._phased, []
+            return out
+        after, shared = self._settled_snapshot()
         return diff(
-            self._before, after, test=test, nodeid=nodeid, shared=shared, scope=self.scope
+            self._before, after, test=test, nodeid=nodeid, shared=shared, scope=self.scope,
+            run=self.run,
         )
 
 
@@ -166,11 +208,13 @@ def open_effects(
     *,
     scope: str = SESSION,
     settle_sec: float = 0.0,
+    run: Optional[Mapping[str, Any]] = None,
 ) -> DbEffects:
-    """Открыть замер: снимок «до» берётся сразу."""
+    """Открыть замер: снимок «до» берётся сразу. *run* — метка прогона в каждой записи."""
     return DbEffects(
         conn=conn,
         schemas=list(schemas or ["public"]),
         scope=scope,
         settle_sec=settle_sec,
+        run=dict(run) if run is not None else None,
     ).start()

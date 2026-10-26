@@ -256,6 +256,8 @@ def test_пишет():
 """,
     )
     result.assert_outcomes(passed=1)
+    from partest_atlas import artifacts
+
     assert doc["records"] == [
         {
             "test": "test_пишет",
@@ -266,6 +268,7 @@ def test_пишет():
             "delete": 0,
             "shared": False,
             "scope": db_effects.TEST,
+            "run": artifacts.run_label(),
         }
     ]
 
@@ -927,3 +930,82 @@ def test_a_bad_schemas_value_leaves_the_plugin_off(monkeypatch, tmp_path, capsys
     plugin.pytest_configure(ФейковыйConfigXdist())
     assert not plugin._active()
     assert "database.schemas" in capsys.readouterr().out
+
+
+# --- метка прогона и фазы ------------------------------------------------------------
+
+
+def test_with_phases_the_fixture_effect_is_its_own_record(прогон):
+    """proposals E: фикстура записала на подготовке — это фаза `setup`, а не вызов теста."""
+    result, doc = прогон(
+        "artifacts_dir: atlas\ndb_effects:\n  phases: true\n",
+        test_фазы="""
+import pytest
+from база import записать
+
+@pytest.fixture
+def заказ():
+    записать("orders")
+    yield
+    записать("orders")
+
+@pytest.mark.db_effects
+def test_a(заказ):
+    записать("users")
+""",
+    )
+    result.assert_outcomes(passed=1)
+    assert [(r["phase"], r["table"], r["insert"]) for r in doc["records"]] == [
+        ("setup", "orders", 1), ("call", "users", 1), ("teardown", "orders", 1),
+    ]
+    assert all(r["run"]["id"] for r in doc["records"])
+    # «до» (первый тест) + граница setup + граница call + после teardown
+    assert прогон.выдержки == [db_effects.DEFAULT_SETTLE_SEC] * 4
+
+
+def test_without_phases_there_is_one_window_and_no_phase_key(прогон):
+    result, doc = прогон(
+        "artifacts_dir: atlas\n",
+        test_окно_целиком="""
+import pytest
+from база import записать
+
+@pytest.fixture
+def заказ():
+    записать("orders")
+
+@pytest.mark.db_effects
+def test_a(заказ):
+    записать("users")
+""",
+    )
+    result.assert_outcomes(passed=1)
+    assert sorted(r["table"] for r in doc["records"]) == ["orders", "users"]
+    assert all("phase" not in r for r in doc["records"])
+
+
+def test_session_records_carry_the_run_label(прогон):
+    from partest_atlas import artifacts
+
+    result, doc = прогон(
+        "artifacts_dir: atlas\ndb_effects:\n  per_test_limit: 0\n",
+        test_метка="""
+import pytest
+from база import записать
+
+@pytest.mark.db_effects
+def test_a():
+    записать("orders")
+""",
+    )
+    result.assert_outcomes(passed=1)
+    assert doc["records"][0]["scope"] == db_effects.SESSION
+    assert doc["records"][0]["run"] == artifacts.run_label()
+
+
+@pytest.mark.parametrize("значение", ["да", "1", "[]"])  # `yes` в YAML 1.1 — true
+def test_a_bad_phases_value_leaves_the_plugin_off(monkeypatch, tmp_path, capsys, значение):
+    _включить(monkeypatch, tmp_path, f"db_effects:\n  phases: {значение}\n")
+    plugin.pytest_configure(ФейковыйConfigXdist())
+    assert not plugin._active()
+    assert "phases" in capsys.readouterr().out

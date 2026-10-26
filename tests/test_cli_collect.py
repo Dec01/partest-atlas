@@ -749,3 +749,18 @@ def test_a_foreign_confpartest_already_imported_is_refused(проект, capsys)
     assert код == 2
     assert "не тот confpartest" in _одна_строка(err)
     assert not _артефакт(проект, "contract.openapi").exists()
+
+
+def test_a_log_the_source_could_not_read_is_unread_not_empty(проект, запустить):
+    _журналы(проект, тело='return {"api": \'referenced from table "orders"\\n\', "cron": None}')
+    _atlas_yaml(проект, ПРАВИЛА)
+
+    код, _, err = запустить("collect", "container-logs", "--root", проект)
+
+    assert код == 0, err
+    doc = artifacts.read(_артефакт(проект, "containers.logs"))
+    assert doc["logs"] == [
+        {"name": "api", "read": True, "lines": 1},
+        {"name": "cron", "read": False, "lines": 0},
+    ]
+    assert doc["stats"]["unread"] == 1

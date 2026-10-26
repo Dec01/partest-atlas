@@ -19,8 +19,20 @@
 
     atlas/<система>/<контур>/db_schema.json
 
-Артефакты первой версии, у которых области действия нет, читаются как ``default/default`` —
-переносить старые данные не требуется.
+Область в файле обязана совпадать с каталогом, в котором файл лежит, а вид — с именем
+файла: :func:`validate` с ``kind=``/``scope=`` и :func:`inspect` это сверяют.
+
+Версия 1
+--------
+Артефакты первой версии (без области действия) **не проходят** :func:`validate`: у них нет
+``scope``, и схема у них старше. Их снимают заново агентом — переносить и править руками
+не нужно. :meth:`Scope.from_doc` читает отсутствующую область как ``default/default``, но
+это только чтение шапки, а не обещание, что такой файл годится как данные.
+
+Публичный интерфейс
+-------------------
+Модуль — контракт формата: имена из ``__all__`` меняются только с записью в
+``CHANGELOG.md``, формат файла — только с повышением :data:`SCHEMA_VERSION`.
 """
 
 from __future__ import annotations
@@ -29,6 +41,7 @@ import json
 import os
 import tempfile
 from dataclasses import dataclass
+from dataclasses import field as _field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -49,6 +62,27 @@ KINDS: Dict[str, str] = {
     "load.profile": "load.json",
     "runner.history": "runs.json",
 }
+
+#: Ключ полезной нагрузки у каждого вида: под ним лежат записи, их число — размер
+#: артефакта. Часть контракта: потребитель не держит свою таблицу. `load.profile` здесь
+#: нет — формат вида не согласован, и его пока никто не пишет.
+PAYLOAD_KEYS: Dict[str, str] = {
+    "db.schema": "databases",
+    "db.effects": "records",
+    "bus.flow": "records",
+    "containers.logs": "containers",
+    "contract.openapi": "operations",
+    "specs.requirements": "requirements",
+    "ui.flow": "links",
+    "runner.history": "runs",
+}
+
+#: Состояния артефакта у :func:`inspect` — машинные коды.
+OK, MISSING, BROKEN, NEWER, INVALID = "ok", "missing", "broken", "newer", "invalid"
+STATES = (OK, MISSING, BROKEN, NEWER, INVALID)
+
+#: Переменная окружения с меткой прогона, если её задаёт тот, кто запускает прогон.
+RUN_ID_ENV = "ATLAS_RUN_ID"
 
 DEFAULT_SCOPE_KEY = "default"
 
@@ -127,6 +161,19 @@ def read(path: Path) -> Dict[str, Any]:
         return {}
 
 
+def _collected_at(value: Any) -> str:
+    """Время съёмки для шапки: строка как есть, `datetime` — ISO, ничего — сейчас."""
+    if value is None:
+        return _now()
+    if isinstance(value, datetime):
+        stamp = value if value.tzinfo else value.astimezone()
+        return stamp.isoformat(timespec="seconds")
+    if isinstance(value, str) and value.strip():
+        return value
+    raise ValueError(t(f"collected_at={value!r}: ожидалась непустая строка или datetime",
+                       f"collected_at={value!r}: expected a non-empty string or a datetime"))
+
+
 def write(
     path: Path,
     kind: str,
@@ -134,21 +181,51 @@ def write(
     *,
     scope: Optional[Scope] = None,
     collector: str = "",
+    collected_at: Any = None,
 ) -> None:
+    """Записать артефакт атомарно.
+
+    *collected_at* — время съёмки, если оно не «сейчас»: детерминированный набор (демо,
+    тест) или наблюдение, снятое раньше записи. Строка пишется как есть, `datetime` — в
+    ISO 8601; без него — текущее время с часовым поясом.
+    """
     _atomic_write(
         Path(path),
         {
             "version": SCHEMA_VERSION,
             "kind": kind,
             "scope": (scope or Scope.from_env()).as_dict(),
-            "collected_at": _now(),
+            "collected_at": _collected_at(collected_at),
             "collector": collector,
             **payload,
         },
     )
 
 
-def validate(doc: Dict[str, Any]) -> List[str]:
+_run: Dict[str, str] = {}
+
+
+def run_label() -> Dict[str, str]:
+    """Метка текущего прогона: ``{"id": …, "startedAt": …}``, одна на процесс.
+
+    Пишется в каждую запись `db.effects` и `bus.flow`: без неё эффект не связать с
+    прогоном, у связи нет возраста, а после очистки отчётов структура снова равна
+    последнему прогону. ``id`` — из ``ATLAS_RUN_ID``, если её задал тот, кто запускает
+    прогон (конвейер, сервер карты), иначе случайный. Значение непрозрачно: сравнивать
+    можно только на равенство.
+    """
+    if not _run:
+        import secrets  # noqa: PLC0415
+
+        given = (os.getenv(RUN_ID_ENV) or "").strip()[:64]
+        _run["id"] = given or secrets.token_hex(6)
+        _run["startedAt"] = _now()
+    return dict(_run)
+
+
+def validate(
+    doc: Dict[str, Any], *, kind: Optional[str] = None, scope: Optional[Scope] = None
+) -> List[str]:
     """Проверить документ артефакта на соответствие контракту. Пустой список — сходится.
 
     Зачем это здесь, а не у потребителя. Формат читает **чужая программа**, и она не
@@ -160,8 +237,13 @@ def validate(doc: Dict[str, Any]) -> List[str]:
     Снисходительность чтения и строгость проверки — разные задачи, и смешивать их нельзя:
     первая держит карту на ногах, вторая ловит того, кто пишет артефакты мимо контракта.
 
+    *kind* — вид, которого ждут по имени файла; *scope* — область по каталогу, в котором
+    файл лежит. Переданы — сверяются с документом: файл схемы под именем эффектов и файл
+    чужого контура в этом каталоге — расхождения, а не годные данные.
+
     Возвращает список человекочитаемых расхождений, ничего не поднимает и не печатает:
-    во что обходится расхождение, решает вызывающий.
+    во что обходится расхождение, решает вызывающий. Тексты — для человека, сверять их
+    машиной не следует; машинное решение — :func:`inspect`.
     """
     problems: List[str] = []
 
@@ -192,24 +274,45 @@ def validate(doc: Dict[str, Any]) -> List[str]:
             f"version={version} is newer than the known schema {SCHEMA_VERSION}: "
             "a newer writer made this artifact, reading it blindly is unsafe",
         ))
+    elif version < SCHEMA_VERSION:
+        problems.append(t(
+            f"version={version} старше схемы {SCHEMA_VERSION}: снимите артефакт заново "
+            "агентом — править старые файлы руками не нужно",
+            f"version={version} is older than schema {SCHEMA_VERSION}: collect the artifact "
+            "again with the agent — old files need no manual editing",
+        ))
 
-    kind = doc.get("kind")
+    doc_kind = doc.get("kind")
     if "kind" not in doc:
         problems.append(missing("kind"))
-    elif kind not in KINDS:
-        problems.append(t(f"kind={kind!r} — не из набора {sorted(KINDS)}",
-                          f"kind={kind!r} is not one of {sorted(KINDS)}"))
+    elif doc_kind not in KINDS:
+        problems.append(t(f"kind={doc_kind!r} — не из набора {sorted(KINDS)}",
+                          f"kind={doc_kind!r} is not one of {sorted(KINDS)}"))
+    elif kind is not None and doc_kind != kind:
+        problems.append(t(
+            f"kind={doc_kind!r} лежит в файле вида {kind!r} ({filename(kind)})",
+            f"kind={doc_kind!r} is in the file of kind {kind!r} ({filename(kind)})",
+        ))
 
-    scope = doc.get("scope")
+    doc_scope = doc.get("scope")
     if "scope" not in doc:
         problems.append(missing("scope"))
-    elif not isinstance(scope, dict):
-        problems.append(t(f"scope: ожидался объект, получено {type(scope).__name__}",
-                          f"scope: expected an object, got {type(scope).__name__}"))
+    elif not isinstance(doc_scope, dict):
+        problems.append(t(f"scope: ожидался объект, получено {type(doc_scope).__name__}",
+                          f"scope: expected an object, got {type(doc_scope).__name__}"))
     else:
-        for field in ("system", "env"):
-            if not isinstance(scope.get(field), str) or not scope.get(field):
-                problems.append(not_text(f"scope.{field}", scope.get(field)))
+        bad = False
+        for part in ("system", "env"):
+            if not isinstance(doc_scope.get(part), str) or not doc_scope.get(part):
+                problems.append(not_text(f"scope.{part}", doc_scope.get(part)))
+                bad = True
+        if not bad and scope is not None and Scope.from_doc(doc) != scope:
+            problems.append(t(
+                f"в файле scope={doc_scope['system']}/{doc_scope['env']}, а лежит он в "
+                f"{scope.system}/{scope.env}",
+                f"the file says scope={doc_scope['system']}/{doc_scope['env']}, but it lies "
+                f"in {scope.system}/{scope.env}",
+            ))
 
     if "collected_at" not in doc:
         problems.append(missing("collected_at"))
@@ -235,6 +338,7 @@ def append_records(
     *,
     scope: Optional[Scope] = None,
     collector: str = "",
+    collected_at: Any = None,
 ) -> None:
     """Дописать записи в артефакт-список, схлопывая точные повторы.
 
@@ -252,4 +356,135 @@ def append_records(
         if signature not in seen:
             seen.add(signature)
             existing.append(record)
-    write(path, kind, {key: existing}, scope=scope, collector=collector)
+    write(path, kind, {key: existing}, scope=scope, collector=collector,
+          collected_at=collected_at)
+
+
+def discover_scopes(artifacts_dir: Path) -> List[Scope]:
+    """Области, для которых на диске лежит хотя бы один артефакт известного вида.
+
+    Раскладка — ``<artifacts_dir>/<система>/<контур>/<файл>``; порядок — по именам
+    каталогов. Каталог без единого файла известного вида областью не считается.
+    """
+    known = set(KINDS.values())
+    base = Path(artifacts_dir)
+    out: List[Scope] = []
+    if not base.is_dir():
+        return out
+    for system in sorted(p for p in base.iterdir() if p.is_dir()):
+        for env in sorted(p for p in system.iterdir() if p.is_dir()):
+            if any((env / name).is_file() for name in known):
+                out.append(Scope(system=system.name, env=env.name))
+    return out
+
+
+@dataclass
+class Inspection:
+    """Решение об одном артефакте: состояние машинным кодом и почему.
+
+    ``state`` — одно из :data:`STATES`:
+
+    ``ok``       прочитан, сходится с контрактом; данные — в :attr:`doc`;
+    ``missing``  файла нет — законное состояние проекта, который этого ещё не собирал;
+    ``broken``   файл есть, но не разбирается как JSON-объект (или пуст);
+    ``newer``    схема новее известной — читать вслепую нельзя;
+    ``invalid``  контракт не сходится (в том числе схема 1, чужой вид, чужая область).
+
+    :attr:`doc` заполнен только при ``ok``: строить что-то из файла, который владелец
+    формата не понимает, нельзя.
+    """
+
+    kind: str
+    path: Path
+    state: str
+    problems: List[str] = _field(default_factory=list)
+    warnings: List[str] = _field(default_factory=list)
+    version: Any = None
+    collected_at: str = ""
+    collector: str = ""
+    #: Число записей под :data:`PAYLOAD_KEYS`; ``None`` — ключа нет или это не список.
+    records: Optional[int] = None
+    doc: Dict[str, Any] = _field(default_factory=dict)
+
+    @property
+    def usable(self) -> bool:
+        return self.state == OK
+
+
+def inspect(path: Path, kind: str, *, scope: Optional[Scope] = None) -> Inspection:
+    """Прочитать артефакт вида *kind* и вынести решение о нём.
+
+    *scope* — область по каталогу, в котором файл лежит; передана — сверяется с файлом
+    (:func:`validate`). Предупреждение, не расхождение: нет ключа полезной нагрузки — шапка
+    сходится, а данных нет.
+    """
+    path = Path(path)
+    if not path.is_file():
+        return Inspection(kind, path, MISSING)
+    doc = read(path)
+    if not isinstance(doc, dict) or not doc:
+        return Inspection(kind, path, BROKEN, problems=[t(
+            "файл есть, но не разбирается как JSON-объект (или пуст)",
+            "the file exists but does not parse as a JSON object (or is empty)",
+        )])
+    found = Inspection(
+        kind, path, OK,
+        version=doc.get("version"),
+        collected_at=str(doc.get("collected_at") or ""),
+        collector=str(doc.get("collector") or ""),
+    )
+    problems = validate(doc, kind=kind, scope=scope)
+    version = doc.get("version")
+    if isinstance(version, int) and not isinstance(version, bool) and version > SCHEMA_VERSION:
+        found.state, found.problems = NEWER, problems
+        return found
+    if problems:
+        found.state, found.problems = INVALID, problems
+        return found
+    key = PAYLOAD_KEYS.get(kind)
+    value = doc.get(key) if key else None
+    if key is not None and key not in doc:
+        found.warnings.append(t(
+            f"нет ключа полезной нагрузки {key!r} — шапка сходится, но данных нет",
+            f"no payload key {key!r} — the header conforms, but there is no data",
+        ))
+    found.records = len(value) if isinstance(value, (list, dict)) else None
+    found.doc = doc
+    return found
+
+
+def scope_of(path: Path) -> Optional[Scope]:
+    """Область по раскладке ``…/<система>/<контур>/<файл>`` — если имя файла известного
+    вида. Иначе ``None``: по пути не сказать, чья это область."""
+    path = Path(path)
+    if path.name not in KINDS.values() or len(path.parts) < 3:
+        return None
+    return Scope(system=path.parent.parent.name, env=path.parent.name)
+
+
+def kind_of(path: Path) -> Optional[str]:
+    """Вид по имени файла; ``None`` — имя не из контракта."""
+    name = Path(path).name
+    return next((k for k, v in KINDS.items() if v == name), None)
+
+
+__all__ = [
+    "DEFAULT_SCOPE_KEY",
+    "Inspection",
+    "KINDS",
+    "PAYLOAD_KEYS",
+    "RUN_ID_ENV",
+    "SCHEMA_VERSION",
+    "STATES",
+    "Scope",
+    "append_records",
+    "discover_scopes",
+    "filename",
+    "inspect",
+    "kind_of",
+    "read",
+    "run_label",
+    "scope_of",
+    "validate",
+    "write",
+]

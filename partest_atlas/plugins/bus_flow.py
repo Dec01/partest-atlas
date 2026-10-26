@@ -17,6 +17,9 @@
 
 ``источник недоступен``
     Описан верно, брокера нет — чинится на стенде.
+
+Каждая запись несёт ``run`` — метку прогона (:func:`partest_atlas.artifacts.run_label`),
+ту же, что у `db_effects` в этом процессе.
 """
 
 from __future__ import annotations
@@ -75,6 +78,7 @@ def pytest_configure(config) -> None:
         include=list(section.get("include") or []),
         settle=settle,
         records=[],
+        run=artifacts.run_label(),
     )
 
 
@@ -104,7 +108,7 @@ def pytest_sessionstart(session) -> None:  # noqa: ARG001
     if not topics:
         _note("под маски bus_flow.include не подошёл ни один топик")
     _state["ctx"] = ctx
-    _state["flow"] = bus_flow.open_flow(reader, topics, scope=bus_flow.SESSION)
+    _state["flow"] = bus_flow.open_flow(reader, topics, scope=bus_flow.SESSION, run=_state["run"])
 
 
 def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ARG001

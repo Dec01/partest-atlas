@@ -51,8 +51,29 @@ def _iter_paths(raw: Sequence[str]) -> List[Path]:
     return out
 
 
+def _expected_scopes(raw: Sequence[str]) -> Dict[Path, Scope]:
+    """Область, которую файл обязан нести, — по каталогу, в котором он найден.
+
+    Только для файлов, найденных в названном каталоге по раскладке
+    ``<каталог>/<система>/<контур>/<файл>``: про файл, названный напрямую, или про файл
+    в корне каталога нельзя сказать, чья это область, и сверять её не с чем.
+    """
+    known = set(artifacts.KINDS.values())
+    out: Dict[Path, Scope] = {}
+    for item in raw:
+        base = Path(item)
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*.json"):
+            parts = path.relative_to(base).parts
+            if path.name in known and len(parts) == 3:
+                out[path] = Scope(system=parts[0], env=parts[1])
+    return out
+
+
 def _cmd_check(paths: Sequence[str], *, as_json: bool) -> int:
     targets = _iter_paths(paths)
+    scopes = _expected_scopes(paths)
     if not targets:
         # Проверка, которой нечего смотреть, не «прошла» — у неё просто нет предмета,
         # и сообщать об этом надо отдельно от чистого результата.
@@ -64,7 +85,9 @@ def _cmd_check(paths: Sequence[str], *, as_json: bool) -> int:
     failed = 0
     for path in targets:
         doc = artifacts.read(path)
-        problems = artifacts.validate(doc)
+        # Вид — по имени файла, область — по каталогу: файл схемы под именем эффектов и
+        # файл чужого контура в этом каталоге — расхождения, а не годные данные.
+        problems = artifacts.validate(doc, kind=artifacts.kind_of(path), scope=scopes.get(path))
         if problems:
             failed += 1
         report.append({"path": str(path), "problems": problems})

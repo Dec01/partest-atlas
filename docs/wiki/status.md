@@ -1,7 +1,7 @@
 ---
 title: Статус partest-atlas
 status: current
-verified: 2026-10-25
+verified: 2026-10-26
 sources: [partest_atlas/__init__.py, CHANGELOG.md]
 audience: agent
 allow_version_literals: true
@@ -17,7 +17,7 @@ allow_version_literals: true
 | | |
 |---|---|
 | Версия | 0.2.2, выпуск 2026-10-25 (совместимо с 0.2.1) |
-| Не выпущено | `CHANGELOG.md`, Unreleased: `partest-atlas collect openapi\|db-schema\|container-logs` — [[components/collect]]; `contract.openapi` с `info` и `source`; `database.schemas: auto`, `database.key`, «нет ни одной таблицы» — ошибка; транзакция только на чтение механизмом (`adapters.postgres.read_only`); ленивое соединение `db_effects`; `--lang ru\|en` и язык по локали; пол partest 2.6.0. Схема — 2, аддитивно |
+| Не выпущено | `CHANGELOG.md`, Unreleased: `partest-atlas collect openapi\|db-schema\|container-logs` — [[components/collect]]; `contract.openapi` с `info` и `source`; `database.schemas: auto`, `database.key`, «нет ни одной таблицы» — ошибка; транзакция только на чтение механизмом (`adapters.postgres.read_only`); ленивое соединение `db_effects`; `--lang ru\|en` и язык по локали; пол partest 2.6.0. Набор формата: метка прогона `run` в `db.effects`/`bus.flow`, фазы `setup`/`call`/`teardown` (`db_effects.phases`), `write(..., collected_at=)`, `validate(kind=, scope=)` и `check` сверяют вид с именем и область с каталогом, `PAYLOAD_KEYS`, `inspect`/`discover_scopes`, `__all__` у `artifacts`, `config`, `collect.history`, записи `runs` непрозрачны, `containers.logs.logs` (прочитан/не прочитан, строки), нормализация `ui.flow.screen`, схема 1 — `invalid`. Схема — 2, аддитивно |
 | 0.2.2 | `partest_atlas.__version__` в 0.2.1 сообщал 0.2.0 (метаданные колеса — 0.2.1); номер теперь в одном месте — `partest_atlas/__init__.py`, `pyproject.toml` берёт его динамически (`CHANGELOG.md`, 0.2.2). |
 | PyPI | `partest-atlas` 0.2.0, опубликована 2026-10-18; 0.1.0 — 2026-10-01; 0.2.1 — 2026-10-25 |
 | 0.2.1 | срез покрытия под `coverage.json` partest 2.7.0 и сохранная история (`CHANGELOG.md`, 0.2.1, совместимо с 0.2.0): `avgRule`, `exception`, `scored`, объект `depth`, `avg: null` как «не измерено» (и для `0.0` при `endpoints: 0` из отчёта постарше), проверка типов недоверенного отчёта; непонятый `runs.json` не трогается: запись прогона пропускается с предупреждением `UnreadableHistory` (в 0.2.0 он молча затирался); `runs.json` — строгий JSON — [[components/history]]. |
@@ -33,11 +33,14 @@ allow_version_literals: true
 - `partest_atlas/artifacts.py` — контракт артефактов версии 2 целиком:
   `version`, `kind`, `scope`, `collected_at`, `collector`; атомарная запись, дописывание
   записей со схлопыванием повторов, снисходительное чтение. См. [[components/artifacts]].
-- `Scope` с умолчанием `default/default` — однопроектный случай неотличим от прежнего,
-  артефакты версии 1 читаются без миграции.
-- `validate(doc)` — проверка документа на соответствие контракту. Отдельно от `read`,
-  который снисходителен нарочно: снисходительность чтения держит карту на ногах,
-  строгость проверки ловит того, кто пишет артефакты мимо контракта.
+- `Scope` с умолчанием `default/default` — однопроектный случай неотличим от прежнего.
+  Артефакты версии 1 контракт не проходят — их снимают заново ([[components/artifacts]]).
+- `validate(doc, kind=, scope=)` — проверка документа на соответствие контракту, вида — с
+  именем файла, области — с каталогом. Отдельно от `read`, который снисходителен нарочно:
+  снисходительность чтения держит карту на ногах, строгость проверки ловит того, кто пишет
+  артефакты мимо контракта. `inspect` — решение об артефакте машинным кодом
+  (`ok`/`missing`/`broken`/`newer`/`invalid`), `discover_scopes` — области на диске (не
+  выпущено).
 - `partest_atlas/cli.py` — команда `partest-atlas`: `show`, `check`, `wrap` и `collect`
   (не выпущено). Коды и поведение — [[components/overview]], `collect` —
   [[components/collect]]; язык вывода — `partest_atlas/lang.py`.
@@ -45,7 +48,7 @@ allow_version_literals: true
   команды, а не обёртки. На Windows скрипты `.cmd`/`.bat` идут через `cmd.exe` с отказом
   от аргументов с `% " & | < > ^` и управляющими символами — граница в
   [[components/overview]].
-- `tests/` — 620 проверок: контракт, атомарность, упаковка, девять сборщиков, три
+- `tests/` — 685 проверок: контракт, атомарность, упаковка, девять сборщиков, три
   плагина (у `db_effects` — сквозь настоящий pytest, в том числе под xdist), обёртка
   (на Windows — с настоящим `cmd.exe`), команда; срез покрытия — на образцах
   `coverage.json` двух эпох partest в `tests/data/`.
@@ -91,8 +94,11 @@ allow_version_literals: true
    2026-10-18.
 7. ~~Срез покрытия под `coverage.json` partest 2.7.0~~ — 0.2.1, 2026-10-25.
 8. Сборщики из командной строки, ленивое соединение `db_effects`, английский вывод — в коде,
-   не выпущено (этап 2 дорожной карты, шаг 1а). Дальше — набор формата 0.3.0 (метка прогона
-   и фазы, `collected_at` в `write`, сверка вида с именем файла и прочее).
+   не выпущено (этап 2 дорожной карты, шаг 1а).
+9. Набор формата от Вехи (запись 2026-10-06, пп. 2–7, 9–16; схема 2, аддитивно) — в коде,
+   не выпущено (шаг 1б). П. 9 закрыт ещё в 0.2.1. Отложено до схемы 3: п. 1 (текст и роль
+   элемента в ключе `merge`), `afterWrite` → `sawWrite` ([[proposals]], B), п. 8 (вид
+   состояния контейнеров), п. 17 (публичность `collect.*.build` для демо).
 
 **Правило, которое держится тестом.** Строка `pytest11` в `pyproject.toml` появляется
 вместе со своим модулем — не раньше и не позже; соответствие в обе стороны проверяет

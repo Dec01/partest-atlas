@@ -196,21 +196,46 @@ def known_values(schema_doc: Mapping[str, Any], bus_doc: Mapping[str, Any]) -> D
     return {"table": tables, "topic": topics}
 
 
-def build(per_container: Mapping[str, Dict[str, Dict[str, int]]]) -> Dict[str, Any]:
-    """Содержание артефакта: что нашлось у каждого контейнера, и сводка."""
+def count_lines(text: Optional[str]) -> int:
+    """Строк в тексте журнала: последняя без перевода строки тоже строка."""
+    if not text:
+        return 0
+    return text.count("\n") + (0 if text.endswith("\n") else 1)
+
+
+def build(
+    per_container: Mapping[str, Dict[str, Dict[str, int]]],
+    logs: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Содержание артефакта: что нашлось у каждого контейнера, и сводка.
+
+    `containers` — только контейнеры с находками, как раньше. *logs* — что прочитано:
+    ``{name, read, lines}`` на каждый контейнер, который назвал источник. Без этого
+    «журнал не прочитан» и «прочитан, связей нет» в артефакте неотличимы: в обоих
+    случаях контейнера в `containers` просто нет.
+    """
     containers = [
         {"name": name, "found": found}
         for name, found in sorted(per_container.items())
         if found
     ]
-    return {
-        "containers": containers,
-        "stats": {
-            "containers": len(containers),
-            "tables": len({v for c in containers for v in (c["found"].get("table") or {})}),
-            "topics": len({v for c in containers for v in (c["found"].get("topic") or {})}),
-        },
+    stats: Dict[str, Any] = {
+        "containers": len(containers),
+        "tables": len({v for c in containers for v in (c["found"].get("table") or {})}),
+        "topics": len({v for c in containers for v in (c["found"].get("topic") or {})}),
     }
+    payload: Dict[str, Any] = {"containers": containers, "stats": stats}
+    if logs is not None:
+        rows = sorted(
+            ({"name": str(r["name"]), "read": bool(r.get("read")), "lines": int(r.get("lines") or 0)}
+             for r in logs),
+            key=lambda r: r["name"],
+        )
+        payload["logs"] = rows
+        stats["read"] = sum(1 for r in rows if r["read"])
+        stats["unread"] = sum(1 for r in rows if not r["read"])
+        stats["lines"] = sum(r["lines"] for r in rows)
+    return payload
 
 
 def collect(config: Optional[Config] = None, *, scope: Optional[Scope] = None) -> Dict[str, Any]:
@@ -221,7 +246,8 @@ def collect(config: Optional[Config] = None, *, scope: Optional[Scope] = None) -
     хотя их никто не читал. Так же без правил: искать в журналах было бы нечего.
 
     Словари для правил `known_only` — из артефактов `db.schema` и `bus.flow` той же
-    области, если они уже сняты.
+    области, если они уже сняты. Журнал ``None`` у контейнера — «не прочитан»: в `logs`
+    он записан с ``read: false``.
     """
     cfg = config or load()
     where = scope or cfg.scope
@@ -253,6 +279,7 @@ def collect(config: Optional[Config] = None, *, scope: Optional[Scope] = None) -
         artifacts.read(where.path(cfg.artifacts_dir, "bus.flow")),
     )
     per_container: Dict[str, Dict[str, Dict[str, int]]] = {}
+    read_rows: List[Dict[str, Any]] = []
     for name, text in logs.items():
         if isinstance(text, bytes):
             text = text.decode("utf-8", errors="replace")
@@ -263,8 +290,11 @@ def collect(config: Optional[Config] = None, *, scope: Optional[Scope] = None) -
                 f"container_logs.source: the log of container {name!r} is "
                 f"{type(text).__name__}, expected text",
             ))
+        # `None` — источник назвал контейнер, но журнал не достал: «не прочитан», а не
+        # «пусто».
+        read_rows.append({"name": str(name), "read": text is not None, "lines": count_lines(text)})
         per_container[str(name)] = scan_text(text or "", rules, known)
-    return build(per_container)
+    return build(per_container, read_rows)
 
 
 def write(config: Optional[Config] = None, *, scope: Optional[Scope] = None) -> Dict[str, Any]:

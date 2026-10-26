@@ -187,3 +187,33 @@ def test_the_project_source_named_in_config_is_used(monkeypatch):
         for имя, текст in источник().items()
     }
     assert найдено == {"контейнер": {"table": {"task": 1}}}
+
+
+# --- «не прочитан» и «пусто» ------------------------------------------------------
+
+
+@pytest.mark.parametrize(("текст", "строк"), [(None, 0), ("", 0), ("a", 1), ("a\n", 1), ("a\nb", 2)])
+def test_lines_are_counted(текст, строк):
+    assert cl.count_lines(текст) == строк
+
+
+def test_read_and_unread_logs_are_told_apart():
+    """Без `logs` контейнер без находок и контейнер, чей журнал не достали, неотличимы."""
+    doc = cl.build(
+        {"api": {"table": {"task": 1}}, "worker": {}, "cron": {}},
+        [{"name": "api", "read": True, "lines": 10},
+         {"name": "worker", "read": True, "lines": 4},
+         {"name": "cron", "read": False, "lines": 0}],
+    )
+    assert [c["name"] for c in doc["containers"]] == ["api"]
+    assert doc["logs"] == [
+        {"name": "api", "read": True, "lines": 10},
+        {"name": "cron", "read": False, "lines": 0},
+        {"name": "worker", "read": True, "lines": 4},
+    ]
+    assert (doc["stats"]["read"], doc["stats"]["unread"], doc["stats"]["lines"]) == (2, 1, 14)
+
+
+def test_build_without_logs_keeps_the_old_shape():
+    assert "logs" not in cl.build({})
+    assert "read" not in cl.build({})["stats"]

@@ -153,3 +153,39 @@ def test_the_artifact_it_writes_validates_clean(tmp_path):
 def test_the_kind_is_one_the_contract_knows():
     assert ui_flow.KIND in artifacts.KINDS
     assert artifacts.filename(ui_flow.KIND) == "ui_flow.json"
+
+
+# --- экран нормализуется, как путь и элемент -------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("сырой", "ожидалось"),
+    [
+        ("#/orders/42", "/#/orders/{id}"),
+        ("#/orders/42?tab=items", "/#/orders/{id}"),
+        ("/#/orders/{orderId}", "/#/orders/{id}"),
+        ("/orders/-1/", "/orders/{id}"),
+        ("#/a/3fa85f64-5717-4562-b3fc-2c963f66afa6/b", "/#/a/{id}/b"),
+        ("/", "/"),
+        ("", ""),
+        (None, ""),
+    ],
+)
+def test_screens_are_normalised(сырой, ожидалось):
+    assert ui_flow.norm_screen(сырой) == ожидалось
+
+
+def test_two_orders_are_one_screen_on_the_map():
+    links = attribute(
+        [{"ts": 0, "screen": "#/orders/1", "control": "save"},
+         {"ts": 10_000, "screen": "#/orders/2", "control": "save"}],
+        [{"ts": 100, "url": "/api/orders/1", "method": "PUT"},
+         {"ts": 10_100, "url": "/api/orders/2", "method": "PUT"}],
+    )
+    rows = build(links)["links"]
+    assert [(r["screen"], r["count"]) for r in rows] == [("/#/orders/{id}", 2)]
+
+
+def test_merge_normalises_screens_it_did_not_attribute():
+    rows = merge([{"screen": "#/x/7", "control": "c", "action": "click", "method": "GET", "path": "/p"}])
+    assert rows[0]["screen"] == "/#/x/{id}"

@@ -1,7 +1,7 @@
 ---
 title: Команда collect — наблюдения без прогона
 status: current
-verified: 2026-10-25
+verified: 2026-10-26
 sources: [partest_atlas/cli.py, partest_atlas/lang.py, partest_atlas/collect/openapi.py, partest_atlas/collect/db_schema.py, partest_atlas/collect/container_logs.py, partest_atlas/adapters/postgres.py, partest_atlas/plugins/db_effects.py, pyproject.toml]
 audience: user
 ---
@@ -116,6 +116,11 @@ swagger_files = {
 выглядел бы как «журналы прочитаны, связей нет». Словари для правил `known_only` — из уже
 снятых `db.schema` и `bus.flow` той же области.
 
+Источник может вернуть для контейнера `None` — журнал не достали. В артефакте рядом с
+`containers` (только контейнеры с находками, как раньше) лежит `logs`:
+`[{name, read, lines}]` на каждый названный контейнер, и в `stats` — `read`, `unread`,
+`lines`. Так «не прочитан» (`read: false`) отличим от «прочитан, связей нет».
+
 ## Язык вывода
 
 `--lang ru|en` важнее локали. Без ключа — первая непустая из `LC_ALL`, `LC_MESSAGES`, `LANG`,
@@ -132,5 +137,3 @@ swagger_files = {
 ## Чего нет
 
 - Сопоставления путей с шаблоном OpenAPI из partest (`partest.path_match`) — не подключено.
-- `containers.logs` по-прежнему не различает «журнал не прочитан» и «прочитан, связей нет»
-  (набор формата от Вехи, п. 4 — [[status]]) и не хранит число прочитанных строк.

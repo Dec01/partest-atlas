@@ -57,6 +57,35 @@ def norm_path(url: str) -> str:
     return _ID_RE.sub("/{id}", path)
 
 
+#: Имена плейсхолдеров в пути экрана: `{orderId}` и `{id}` — один и тот же.
+_PLACEHOLDER_RE = re.compile(r"\{[^}]*\}")
+
+#: Число (в том числе отрицательное — тесты «несуществующего ресурса» ходят в `/…/-1`)
+#: или uuid сегментом пути экрана.
+_SCREEN_ID_RE = re.compile(
+    r"/(?:-?\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?=/|$)"
+)
+
+
+def norm_screen(screen: Optional[str]) -> str:
+    """Экран к общему виду: `#/orders/42?tab=1` → `/#/orders/{id}`.
+
+    Рекордер пишет `location.hash || location.pathname`, и без нормализации каждый
+    заказ становился отдельным экраном, как строки таблиц до :func:`norm_testid`. Ведущий
+    `/` перед `#`, запрос `?…` отрезан, числа и uuid — `{id}`, имена плейсхолдеров —
+    `{id}`. Корень `/` остаётся `/`; пустая строка — «экран неизвестен».
+    """
+    text = (screen or "").strip()
+    if not text:
+        return ""
+    if text.startswith("#"):
+        text = "/" + text
+    text = text.split("?", 1)[0]
+    text = _PLACEHOLDER_RE.sub("{id}", text.rstrip("/")) or "/"
+    return _SCREEN_ID_RE.sub("/{id}", text)
+
+
 def confidence_for(gap_ms: float) -> str:
     """Насколько связи можно верить. Два значения, а не флаг: «сразу» и «в окне» —
     разные утверждения, и читающему надо их различать."""
@@ -96,7 +125,7 @@ def attribute(
             continue
         out.append(
             {
-                "screen": action.get("screen") or "",
+                "screen": norm_screen(action.get("screen")),
                 "control": norm_testid(action.get("control")),
                 "action": action.get("type") or "click",
                 "method": str(call.get("method") or "GET").upper(),
@@ -122,7 +151,9 @@ def merge(links: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     """
     buckets: Dict[tuple, Dict[str, Any]] = {}
     for link in links:
-        key = (link.get("screen"), link.get("control"), link.get("action"),
+        # Экран — нормализованный и здесь: связи, собранные не через `attribute`, иначе
+        # разошлись бы на `#/orders/1` и `#/orders/2`.
+        key = (norm_screen(link.get("screen")), link.get("control"), link.get("action"),
                link.get("method"), link.get("path"))
         row = buckets.get(key)
         if row is None:

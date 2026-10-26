@@ -12,6 +12,11 @@
 Файл необязателен целиком, и каждый раздел в нём необязателен. Нет раздела — нет
 сборщика; это рабочее состояние, а не ошибка. Набор разделов говорит, **что проект готов
 показать**, и ничего не обещает сверх этого.
+
+Публичный интерфейс — имена из ``__all__``: им пользуются и чужие программы (сервер карты
+читает тот же `atlas.yaml` со своими разделами), поэтому они меняются только с записью в
+``CHANGELOG.md``. Разделы, которых пакет не знает, :class:`Config` отдаёт как есть
+(:meth:`Config.section`) — они принадлежат тому, кто их читает.
 """
 
 from __future__ import annotations
@@ -24,6 +29,17 @@ from typing import Any, Dict, Optional
 
 from partest_atlas.artifacts import Scope
 from partest_atlas.lang import t
+
+__all__ = [
+    "CONFIG_NAME",
+    "DEFAULT_ARTIFACTS_DIR",
+    "Config",
+    "ConfigError",
+    "env",
+    "find",
+    "load",
+    "non_negative",
+]
 
 CONFIG_NAME = "atlas.yaml"
 

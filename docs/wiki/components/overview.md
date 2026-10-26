@@ -1,8 +1,8 @@
 ---
 title: Карта пакета
 status: current
-verified: 2026-10-25
-sources: [partest_atlas/__init__.py, pyproject.toml, partest_atlas/cli.py, partest_atlas/wrap.py, partest_atlas/plugins/db_effects.py, partest_atlas/collect/bus_flow.py, partest_atlas/collect/specs.py, partest_atlas/plugins/bus_flow.py]
+verified: 2026-10-26
+sources: [partest_atlas/__init__.py, pyproject.toml, partest_atlas/cli.py, partest_atlas/wrap.py, partest_atlas/plugins/db_effects.py, partest_atlas/collect/bus_flow.py, partest_atlas/collect/specs.py, partest_atlas/plugins/bus_flow.py, partest_atlas/config.py, partest_atlas/collect/ui_flow.py]
 audience: agent
 ---
 
@@ -28,6 +28,19 @@ partest_atlas/
 
 `partest_atlas` экспортирует `KINDS`, `SCHEMA_VERSION`, `Scope` и `__version__` — всё из
 `artifacts`. Это не случайность и не незавершённость: интерфейс пакета — формат, а не классы.
+
+Публичны и имена из `__all__` трёх модулей — ими пользуются чужие программы (сервер карты):
+
+| Модуль | Что | Страница |
+|---|---|---|
+| `partest_atlas.artifacts` | формат: виды, ключи полезной нагрузки, запись, `validate`, `inspect`, `discover_scopes`, метка прогона | [[components/artifacts]] |
+| `partest_atlas.config` | `atlas.yaml`: `load`, `find`, `Config`, `ConfigError`, `CONFIG_NAME`, `DEFAULT_ARTIFACTS_DIR`, `env`, `non_negative` | этот раздел |
+| `partest_atlas.collect.history` | история прогонов: `append`, `read`, `trim`, `coverage_snapshot`, `UnreadableHistory`, `KIND`, `DEFAULT_LIMIT`, `COVERAGE_KEYS`, `MAX_BYTES` | [[components/history]] |
+
+Меняются они только с записью в `CHANGELOG.md`. Разделы `atlas.yaml`, которых пакет не
+знает, `Config.section` отдаёт как есть — они принадлежат тому, кто их читает.
+Остальные модули (`collect.*`, `adapters`, `plugins`, `cli`) — реализация: их функции
+можно звать, но обещаний о них пакет не даёт.
 
 ## Три уровня внедрения
 
@@ -129,6 +142,17 @@ partest_atlas/
 `test` не попадают никуда. В `session` — одна дельта на прогон с пустыми `test` и
 `nodeid`.
 
+**Метка прогона и фазы.** Каждая запись `db.effects` и `bus.flow` несёт
+`run: {id, startedAt}` — одну на процесс (`artifacts.run_label()`); `id` — из
+`ATLAS_RUN_ID`, если его задал тот, кто запускает прогон, иначе случайный. По ней читатель
+отличает последний прогон и знает возраст связи; записи разных прогонов больше не
+схлопываются в одну, и файл растёт с каждым прогоном. С `db_effects.phases: true` окно
+теста в режиме `test` делится на фазы: у каждой своя дельта и ключ `phase`
+(`setup`/`call`/`teardown`) — эффект фикстуры виден отдельно от эффекта теста ([[proposals]],
+E). Цена — выдержка `settle_sec` на каждой границе: до двух лишних на тест, и они **внутри**
+протокола теста — то есть внутри таймера pytest-timeout, если он стоит на весь протокол.
+По умолчанию выключено; кривое значение (не `true`/`false`) — ошибка конфигурации.
+
 **Соединение — только когда есть что мерить.** Ни одного теста под замером или
 `--collect-only` — соединение не открывается, артефакт не пишется (дельту всего прогона без
 маркеров даёт `ATLAS_DB_EFFECTS_ALL=1`). В `session` оно открывается после отбора тестов, в
@@ -141,7 +165,8 @@ partest_atlas/
 `test` выключен с сообщением; контроллер маркеров не видит, и соединение открывается в начале
 сессии. `bus_flow` под xdist так же: смещения снимает контроллер.
 `ui_flow` пишет файл с каждого воркера целиком, и под xdist в нём остаются связи
-последнего.
+последнего. Экран в `ui.flow` нормализуется, как путь и элемент: `#/orders/42?tab=1` →
+`/#/orders/{id}` — иначе каждый заказ был бы отдельным экраном.
 
 `settle_sec` и `per_test_limit` у `db_effects`, `settle_sec` у `bus_flow` — конечные
 неотрицательные числа; `0` — это ноль, кривое значение выключает плагин как ошибку

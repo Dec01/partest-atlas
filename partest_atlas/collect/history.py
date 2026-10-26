@@ -20,6 +20,14 @@
 Число записей ограничено. Без предела артефакт растёт линейно по числу прогонов и
 однажды перестаёт открываться — а тренд по тысяче прогонов всё равно не читают.
 Отбрасывается **начало**: старое, а не новое.
+
+**Записи `runs` для владельца формата непрозрачны.** Их поля задаёт тот, кто дописывает
+(сервер карты, конвейер, :func:`coverage_snapshot` для среза покрытия): пакет требует
+только, чтобы запись была объектом и записывалась строгим JSON, и ни `validate`, ни
+`read` не проверяют в ней ни одного поля. Поэтому чужие поля в записях не делают историю
+непонятой, а новые поля у вызывающего не требуют новой версии пакета.
+
+Публичный интерфейс — имена из ``__all__``.
 """
 
 from __future__ import annotations
@@ -377,6 +385,19 @@ def _avg_rule(doc: Mapping[str, Any]) -> Optional[int]:
     if isinstance(rule, bool) or not isinstance(rule, int) or abs(rule) > COUNT_LIMIT:
         return None
     return rule
+
+
+__all__ = [
+    "COVERAGE_KEYS",
+    "DEFAULT_LIMIT",
+    "KIND",
+    "MAX_BYTES",
+    "UnreadableHistory",
+    "append",
+    "coverage_snapshot",
+    "read",
+    "trim",
+]
 
 
 def coverage_snapshot(document: Optional[Mapping[str, Any]]) -> Dict[str, Any]:

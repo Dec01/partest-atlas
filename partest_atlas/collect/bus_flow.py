@@ -60,8 +60,11 @@ def diff_offsets(
     scope: str = SESSION,
     last_write: float = 0.0,
     counters: Optional[Mapping[str, int]] = None,
+    run: Optional[Mapping[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Сколько событий прошло по каждому топику. Топики без событий не попадают в вывод.
+
+    *run* — метка прогона (:func:`partest_atlas.artifacts.run_label`), ключом ``run``.
 
     Две тонкости, каждая оплачена поведением настоящей шины:
 
@@ -89,6 +92,8 @@ def diff_offsets(
             "events": events,
             "scope": scope,
         }
+        if run is not None:
+            record["run"] = dict(run)
         if last_write or counters:
             # `afterWrite` задумывался как признак работы потребителя: событие прошло
             # позже последней пишущей HTTP-записи. **Фактически** он значит меньшее:
@@ -162,6 +167,7 @@ class BusFlow:
     topics: List[str] = field(default_factory=list)
     settle_sec: float = 0.0
     scope: str = SESSION
+    run: Optional[Dict[str, Any]] = None
     _before: Dict[str, Dict[int, int]] = field(default_factory=dict, init=False)
 
     def discover(self) -> List[str]:
@@ -181,7 +187,7 @@ class BusFlow:
         after = {t: dict(self.reader.end_offsets(t)) for t in self._before}
         return diff_offsets(
             self._before, after, test=test, nodeid=nodeid, scope=self.scope,
-            last_write=last_write, counters=counters,
+            last_write=last_write, counters=counters, run=self.run,
         )
 
 
@@ -191,12 +197,14 @@ def open_flow(
     *,
     scope: str = SESSION,
     settle_sec: float = 0.0,
+    run: Optional[Mapping[str, Any]] = None,
 ) -> BusFlow:
     flow = BusFlow(
         reader=reader,
         topics=list(topics or []),
         scope=scope,
         settle_sec=settle_sec,
+        run=dict(run) if run is not None else None,
     )
     if not flow.topics:
         flow.topics = flow.discover()

@@ -40,6 +40,14 @@
 Под xdist контроллер маркеров не видит, и там соединение по-прежнему открывается в начале
 сессии.
 
+**Метка прогона и фазы.** Каждая запись несёт ``run`` — метку прогона
+(:func:`partest_atlas.artifacts.run_label`: ``ATLAS_RUN_ID`` или случайная, плюс время
+начала). С ``db_effects.phases: true`` окно теста в режиме ``test`` делится на фазы
+``setup``/``call``/``teardown`` — у каждой своя дельта и ключ ``phase``: эффект фикстуры
+отделяется от эффекта самого теста. Цена — выдержка ``settle_sec`` на каждой границе
+фазы, **внутри** протокола теста (и внутри таймера pytest-timeout, если он стоит на весь
+протокол): до двух лишних выдержек на тест. По умолчанию выключено.
+
 **Только чтение держит база:** каждый снимок идёт в транзакции только на чтение
 (:func:`partest_atlas.adapters.postgres.read_only`). ``database.schemas: auto`` — все
 несистемные схемы; если в выбранных схемах нет ни одной таблицы, сборщик выключается как
@@ -130,6 +138,9 @@ def pytest_configure(config) -> None:
         cfg: Config = load()
         section = cfg.section(MARKER)
         settle = _number(section, "settle_sec", db_effects.DEFAULT_SETTLE_SEC, float)
+        phases = section.get("phases", False)
+        if not isinstance(phases, bool):
+            raise ValueError(f"{MARKER}.phases={phases!r}: ожидалось true или false")
         limit = _number(section, "per_test_limit", DEFAULT_PER_TEST_LIMIT, int)
         database = cfg.section("database")
         # `None` — `schemas: auto`: какие схемы, узнаём у базы, когда соединение откроется.
@@ -147,6 +158,8 @@ def pytest_configure(config) -> None:
         settle=settle,
         limit=limit,
         records=[],
+        phases=phases,
+        run=artifacts.run_label(),
         selected=0,
         mode=db_effects.SESSION,
         distributed=_distributed(config),
@@ -205,15 +218,19 @@ def pytest_runtest_protocol(item, nextitem):  # noqa: ARG001
     ``settle_sec`` ещё и перед снимком «до». В режиме ``session`` хук ничего не делает.
     """
     probe = _open_test_probe(item)
+    if probe is not None and _state.get("phases"):
+        _state["phased"] = (item.nodeid, probe)
     yield
+    phased = _state.pop("phased", None)
     if not _active():
         return
     _state["prev_measured"] = probe is not None
     if probe is not None:
         try:
-            _state.setdefault("records", []).extend(
-                probe.finish(test=item.name, nodeid=item.nodeid)
-            )
+            _state.setdefault("records", []).extend(probe.finish(
+                test=item.name, nodeid=item.nodeid,
+                phase="teardown" if phased is not None else None,
+            ))
         except Exception as exc:  # pragma: no cover - зависит от стенда
             _note(f"снимок «после» теста {item.nodeid} не снялся ({type(exc).__name__}: {exc})")
     if "remaining" in _state and item.nodeid in (_state.get("wanted") or ()):
@@ -222,6 +239,30 @@ def pytest_runtest_protocol(item, nextitem):  # noqa: ARG001
         _state["remaining"] -= 1
         if _state["remaining"] <= 0:
             _close()
+
+
+def _phase_boundary(item, phase: str) -> None:
+    """Граница фазы окна теста под замером с ``phases: true``. Неудача — без записей фазы."""
+    phased = _state.get("phased")
+    if not _active() or phased is None or phased[0] != item.nodeid:
+        return
+    try:
+        phased[1].checkpoint(phase, test=item.name, nodeid=item.nodeid)
+    except Exception as exc:  # pragma: no cover - зависит от стенда
+        _note(f"снимок после фазы {phase} теста {item.nodeid} не снялся "
+              f"({type(exc).__name__}: {exc})")
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_runtest_setup(item):
+    yield
+    _phase_boundary(item, "setup")
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_runtest_call(item):
+    yield
+    _phase_boundary(item, "call")
 
 
 def _open_test_probe(item):
@@ -246,7 +287,8 @@ def _open_test_probe(item):
         return _first_probe(db_effects.TEST, settle_sec=_state["settle"])
     try:
         return db_effects.open_effects(
-            conn, _state["schemas"], scope=db_effects.TEST, settle_sec=_state["settle"]
+            conn, _state["schemas"], scope=db_effects.TEST, settle_sec=_state["settle"],
+            run=_state.get("run"),
         )
     except Exception as exc:  # pragma: no cover - зависит от стенда
         _note(f"снимок «до» теста {item.nodeid} не снялся ({type(exc).__name__}: {exc})")
@@ -309,13 +351,15 @@ def _first_probe(scope: str, *, settle_sec: float = 0.0):
     """Первый снимок на соединении. Не снялся или таблиц нет — сборщик выключен."""
     schemas = list(_state["schemas"])
     try:
-        probe = db_effects.open_effects(_state["conn"], schemas, scope=scope, settle_sec=settle_sec)
+        probe = db_effects.open_effects(
+            _state["conn"], schemas, scope=scope, settle_sec=settle_sec, run=_state.get("run")
+        )
     except Exception as exc:
         # Соединение открылось, а снимок «до» — нет (прав на статистику, схема): тоже
         # выключенный сборщик, а не INTERNALERROR прогона.
         _off(f"снимок «до» не снялся ({type(exc).__name__}: {exc})")
         return None
-    if not probe._before:
+    if not probe.tables:
         # Пустая статистика — схемы не те (таблицы переехали): молча записанная пустая
         # дельта выглядела бы как «прогон ничего не менял».
         _off(f"в выбранных схемах нет ни одной таблицы: {', '.join(schemas)} — проверьте "
