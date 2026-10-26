@@ -272,10 +272,12 @@ def pytest_runtest_protocol(item, nextitem):  # noqa: ARG001
                 test=item.name, nodeid=item.nodeid,
                 phase="teardown" if phased is not None else None,
             )
-            attempt = int(getattr(item, "execution_count", 1) or 1)
-            if attempt > 1:
-                # pytest-rerunfailures: повтор — отдельная попытка, а не повтор записи.
-                rows = [{**r, "attempt": attempt} for r in rows]
+            attempts = int(getattr(item, "execution_count", 1) or 1)
+            if attempts > 1:
+                # pytest-rerunfailures повторяет тест внутри одного протокола, и окно замера
+                # охватывает все попытки: дельта — их сумма. Так и называется — `attempts: N`,
+                # «дельта за N попыток», а не «попытка N».
+                rows = [{**r, "attempts": attempts} for r in rows]
             _state.setdefault("records", []).extend(rows)
         except Exception as exc:  # pragma: no cover - зависит от стенда
             _note(f"снимок «после» теста {item.nodeid} не снялся ({type(exc).__name__}: {exc})")

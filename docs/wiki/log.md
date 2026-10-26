@@ -12,6 +12,12 @@ allow_version_literals: true
 Хронология: что сделано с документацией и почему. Новые записи сверху.
 Формат строки: дата · операция (ingest / update / lint / restructure) · что затронуто.
 
+## 2026-10-26 · update · находки qa: `attempts` и строгое чтение (не выпущено)
+
+[[components/artifacts]], [[components/overview]] — `attempt` → `attempts: N` (окно
+охватывает все попытки повтора, дельта — их сумма); `check` и `show` читают строго, как
+`inspect`. [[status]]; [[proposals]] — Y (составные ключи в тексте — у partest).
+
 ## 2026-10-26 · update · узкий раунд security: исключение для идентификаторов (не выпущено)
 
 [[components/artifacts]] — как есть только «чистая» строка-идентификатор, секретные ключи по

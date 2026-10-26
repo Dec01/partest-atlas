@@ -216,9 +216,11 @@ def read(path: Path) -> Dict[str, Any]:
         return {}
 
 
-def _read_strict(path: Path) -> Any:
-    """Строгое чтение для :func:`inspect`: UTF-8 с BOM или без, `NaN`/`Infinity` — не JSON
-    (их не примет `JSON.parse` читающей программы). Не разбирается — ``{}``."""
+def read_strict(path: Path) -> Any:
+    """Строгое чтение — для :func:`inspect` и команд `check`/`show`: UTF-8 с BOM или без,
+    `NaN`/`Infinity` — не JSON (их не примет `JSON.parse` читающей программы). Не
+    разбирается — ``{}``. Терпимый :func:`read` оставлен тем, кому надо подняться на
+    проекте, где ничего не собрано; решать «сходится ли» по нему нельзя."""
     def refuse(token: str) -> Any:
         raise ValueError(token)
 
@@ -702,7 +704,7 @@ def inspect(path: Path, kind: str, *, scope: Optional[Scope] = None) -> Inspecti
     path = Path(path)
     if not path.is_file():
         return Inspection(kind, path, MISSING)
-    doc = _read_strict(path)
+    doc = read_strict(path)
     if not isinstance(doc, dict) or not doc:
         return Inspection(kind, path, BROKEN, problems=[t(
             "файл есть, но не разбирается как JSON-объект (или пуст)",
@@ -776,6 +778,7 @@ __all__ = [
     "redact_payload",
     "kind_of",
     "read",
+    "read_strict",
     "run_label",
     "scope_of",
     "valid_scope_part",

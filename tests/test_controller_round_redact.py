@@ -188,3 +188,35 @@ def test_6_a_number_under_a_secret_key_is_a_count_not_a_secret():
     out = artifacts.redact_payload({"found": {"table": {"user_session": 3}}, "api_token": "abc"})
     assert out["found"]["table"]["user_session"] == 3
     assert out["api_token"] != "abc"
+
+
+# --- qa: check и show читают строго, как inspect ---------------------------------------------
+
+
+def _nan_artifact(tmp_path):
+    путь = tmp_path / "db_schema.json"
+    путь.write_text(
+        '{"version": 2, "kind": "db.schema", "scope": {"system": "default", "env": "default"}, '
+        '"collected_at": "2026-01-01T00:00:00+00:00", "collector": "", "databases": [], '
+        '"stats": {"tables": NaN}}',
+        encoding="utf-8",
+    )
+    return путь
+
+
+def test_check_does_not_call_a_nan_artifact_conforming(tmp_path, capsys, monkeypatch):
+    from partest_atlas import cli
+
+    monkeypatch.setenv("LC_ALL", "ru_RU.UTF-8")
+    путь = _nan_artifact(tmp_path)
+    assert artifacts.inspect(путь, "db.schema").state == artifacts.BROKEN
+    assert cli.main(["check", str(путь)]) == cli.EXIT_PROBLEMS
+    assert "не строгий JSON" in capsys.readouterr().out
+
+
+def test_show_does_not_show_a_nan_artifact_as_valid(tmp_path, capsys, monkeypatch):
+    from partest_atlas import cli
+
+    monkeypatch.setenv("LC_ALL", "ru_RU.UTF-8")
+    assert cli.main(["show", str(_nan_artifact(tmp_path))]) == 1
+    assert "NaN" in capsys.readouterr().err

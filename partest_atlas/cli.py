@@ -88,12 +88,18 @@ def _cmd_check(paths: Sequence[str], *, as_json: bool) -> int:
     report = []
     failed = 0
     for path in targets:
-        doc = artifacts.read(path)
+        # Строго, как `inspect`: файл с `NaN` терпимый `read` отдал бы целым, и `check`
+        # назвал бы «сходится» то, что `inspect` и `JSON.parse` читающей программы не примут.
+        doc = artifacts.read_strict(path)
         # Вид — по имени файла, область — по каталогу: файл схемы под именем эффектов и
         # файл чужого контура в этом каталоге — расхождения, а не годные данные.
         laid_out = path in scopes
         expected = scopes.get(path)
-        problems = artifacts.validate(doc, kind=artifacts.kind_of(path), scope=expected)
+        if not doc and artifacts.read(path):
+            problems = [t("не строгий JSON: NaN или Infinity, которых не примет JSON.parse",
+                          "not strict JSON: NaN or Infinity, which JSON.parse rejects")]
+        else:
+            problems = artifacts.validate(doc, kind=artifacts.kind_of(path), scope=expected)
         if laid_out and expected is None:
             problems.append(t(f"каталог области не по правилу: {artifacts.SCOPE_RULE_RU}",
                               f"the scope directory breaks the rule: {artifacts.SCOPE_RULE_EN}"))
@@ -134,13 +140,14 @@ def _cmd_show(paths: Sequence[str], *, as_json: bool) -> int:
     rows = []
     unreadable = 0
     for path in targets:
-        doc = artifacts.read(path)
+        doc = artifacts.read_strict(path)  # строго, как `inspect` и `check`
         if not isinstance(doc, dict) or not doc.get("kind"):
-            # Пустой, битый или чужой JSON: `read` снисходителен и отдал бы его как есть,
-            # а шапка из `None` с кодом 0 выдала бы его за показанный артефакт.
+            # Пустой, битый, нестрогий (`NaN`) или чужой JSON: шапка из `None` с кодом 0
+            # выдала бы его за показанный артефакт.
             print(_printable(t(
-                f"не артефакт (нет поля kind; пуст, битый или чужой JSON): {path}",
-                f"not an artifact (no kind field; empty, broken or foreign JSON): {path}")),
+                f"не артефакт (нет поля kind; пуст, битый, с NaN/Infinity или чужой JSON): {path}",
+                f"not an artifact (no kind field; empty, broken, with NaN/Infinity or foreign "
+                f"JSON): {path}")),
                 file=sys.stderr)
             unreadable += 1
             continue

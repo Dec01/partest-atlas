@@ -1014,27 +1014,73 @@ def test_a_bad_phases_value_leaves_the_plugin_off(monkeypatch, tmp_path, capsys,
 # --- сводный раунд 0.3.0: попытки повтора и битый файл ---------------------------------
 
 
-def test_a_rerun_attempt_is_its_own_record_not_a_duplicate(прогон, pytester):
-    """pytest-rerunfailures выставляет `item.execution_count`; здесь его ставит conftest,
-    чтобы не зависеть от установленного плагина (п. 12)."""
-    pytester.makeconftest("""
-def pytest_collection_modifyitems(items):
-    for item in items:
-        item.execution_count = 2
-""")
-    result, doc = прогон(
-        "artifacts_dir: atlas\n",
-        test_повтор="""
+#: Как pytest-rerunfailures: повторы — внутри одного `pytest_runtest_protocol`, с
+#: `item.execution_count` = номер попытки. Окно замера `db_effects` (обёртка снаружи)
+#: охватывает все попытки — как и под настоящим плагином.
+ПОВТОРЫ = """
+import pytest
+from _pytest.runner import runtestprotocol
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_protocol(item, nextitem):
+    for попытка in (1, 2):
+        item.execution_count = попытка
+        runtestprotocol(item, nextitem=nextitem, log=попытка == 2)
+    return True
+"""
+
+ДВЕ_ВСТАВКИ = """
 import pytest
 from база import записать
 
 @pytest.mark.db_effects
 def test_a():
     записать("orders")
+"""
+
+
+def test_a_rerun_window_is_named_as_the_sum_of_its_attempts(прогон, pytester):
+    """Окно охватывает обе попытки: одна запись `insert: 2, attempts: 2` — «дельта за две
+    попытки», а не «вторая попытка» (п. 12, исправлено после qa)."""
+    pytester.makeconftest(ПОВТОРЫ)
+    result, doc = прогон("artifacts_dir: atlas\n", test_повтор=ДВЕ_ВСТАВКИ)
+    assert [(r["insert"], r.get("attempts"), "attempt" in r) for r in doc["records"]] == [(2, 2, False)]
+
+
+def test_records_with_different_attempts_are_not_collapsed(tmp_path):
+    from partest_atlas import artifacts
+
+    путь = tmp_path / "db_effects.json"
+    запись = {"nodeid": "t", "table": "orders", "insert": 1}
+    artifacts.append_records(путь, "db.effects", "records", [запись, {**запись, "attempts": 2}])
+    assert len(artifacts.read(путь)["records"]) == 2
+
+
+def test_under_real_pytest_rerunfailures_the_sum_is_named(прогон, pytester):
+    """Под настоящим плагином: первая попытка вставляет и падает, вторая вставляет и
+    проходит — `insert: 2, attempts: 2`."""
+    pytest.importorskip("pytest_rerunfailures")
+    result, doc = прогон(
+        "artifacts_dir: atlas\n",
+        "-p", "rerunfailures", "--reruns", "2",
+        test_повтор_плагином="""
+import pytest
+from pathlib import Path
+from база import записать
+
+@pytest.mark.db_effects
+def test_a():
+    записать("orders")
+    метка = Path("упало.txt")
+    if not метка.exists():
+        метка.write_text("1")
+        raise AssertionError("первая попытка")
 """,
     )
-    result.assert_outcomes(passed=1)
-    assert [r.get("attempt") for r in doc["records"]] == [2]
+    исходы = result.parseoutcomes()
+    assert (исходы.get("passed"), исходы.get("rerun")) == (1, 1)
+    assert [(r["insert"], r.get("attempts")) for r in doc["records"]] == [(2, 2)]
 
 
 def test_a_broken_artifact_file_is_reported_not_an_internalerror(прогон, pytester):

@@ -156,7 +156,8 @@ partest_atlas/
 свежесть — наибольший `run.startedAt`) **плюс** последняя запись каждой связи (`nodeid`,
 таблица или топик, `phase`) — правило в [[components/artifacts]]
 (`db_effects.keep_runs`, `bus_flow.keep_runs`; по умолчанию 20, `0` — без предела).
-Повтор теста (pytest-rerunfailures) пишется с `attempt`. Не удалось записать файл
+Повтор теста (pytest-rerunfailures) пишется с `attempts: N` — окно охватывает все
+попытки, дельта — их сумма. Не удалось записать файл
 (битый, чужой, каталог на его месте) — строка `[atlas] … не записан`, а не INTERNALERROR.
 С `db_effects.phases: true` окно
 теста в режиме `test` делится на фазы: у каждой своя дельта и ключ `phase`
