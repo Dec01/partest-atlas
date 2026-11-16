@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import socket
 import sys
@@ -376,9 +375,24 @@ def сервер():
     srv.server_close()
 
 
-def test_openapi_from_a_url_keeps_no_credentials_and_no_query(проект, запустить, сервер):
+def test_http_url_userinfo_is_refused_before_request_without_secrets(проект, запустить, сервер):
     адрес, увидено = сервер
     _confpartest(проект, {"магазин": ["url", f"http://robot:s3cr3t@{адрес}/v3/api-docs?access_token=abc#x"]})
+
+    код, out, err = запустить("collect", "openapi", "--root", проект)
+
+    строка = _одна_строка(err)
+    assert код == 1
+    assert "Basic Auth requires an https:// URL" in строка
+    for секрет in ("s3cr3t", "robot", "access_token", "abc"):
+        assert секрет not in строка and секрет not in out
+    assert увидено == []
+    assert not _артефакт(проект, "contract.openapi").exists()
+
+
+def test_openapi_from_a_public_http_url_keeps_no_query(проект, запустить, сервер):
+    адрес, увидено = сервер
+    _confpartest(проект, {"магазин": ["url", f"http://{адрес}/v3/api-docs?access_token=abc#x"]})
 
     код, out, err = запустить("collect", "openapi", "--root", проект)
 
@@ -387,22 +401,24 @@ def test_openapi_from_a_url_keeps_no_credentials_and_no_query(проект, за
     assert doc["source"] == {"service": "магазин", "type": "url", "location": f"http://{адрес}/v3/api-docs"}
     assert doc["info"]["title"] == "Магазин"
     сырой = _артефакт(проект, "contract.openapi").read_text(encoding="utf-8")
-    for секрет in ("s3cr3t", "robot", "access_token", "abc"):
+    for секрет in ("access_token", "abc"):
         assert секрет not in сырой and секрет not in out and секрет not in err
-    # Учётные данные ушли заголовком, а не в адресе.
-    assert увидено[0]["auth"] == "Basic " + base64.b64encode(b"robot:s3cr3t").decode()
+    assert увидено == [{"path": "/v3/api-docs?access_token=abc", "auth": None}]
 
 
 def test_a_url_answering_404_is_one_line_without_secrets(проект, запустить, сервер):
-    адрес, _ = сервер
-    _confpartest(проект, {"магазин": ["url", f"http://robot:s3cr3t@{адрес}/нет?token=abc"]})
+    адрес, увидено = сервер
+    _confpartest(проект, {"магазин": ["url", f"http://{адрес}/нет?token=abc"]})
 
     код, _, err = запустить("collect", "openapi", "--root", проект)
 
     строка = _одна_строка(err)
     assert код == 1
     assert "404" in строка
-    assert "s3cr3t" not in строка and "token=abc" not in строка
+    assert "token" not in строка and "abc" not in строка
+    assert len(увидено) == 1
+    assert увидено[0]["path"].endswith("?token=abc")
+    assert увидено[0]["auth"] is None
     assert not _артефакт(проект, "contract.openapi").exists()
 
 
@@ -410,14 +426,14 @@ def test_an_unreachable_url_is_one_line_without_secrets(проект, запус
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         порт = s.getsockname()[1]
-    _confpartest(проект, {"магазин": ["url", f"http://robot:s3cr3t@127.0.0.1:{порт}/v3?token=abc"]})
+    _confpartest(проект, {"магазин": ["url", f"http://127.0.0.1:{порт}/v3?token=abc"]})
 
     код, _, err = запустить("collect", "openapi", "--root", проект)
 
     строка = _одна_строка(err)
     assert код == 1
     assert f"127.0.0.1:{порт}" in строка
-    assert "s3cr3t" not in строка and "token=abc" not in строка
+    assert "token" not in строка and "abc" not in строка
 
 
 # --- collect db-schema: база — функция проекта, отвечающая как PostgreSQL -------------

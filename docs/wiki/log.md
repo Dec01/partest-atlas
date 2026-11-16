@@ -1,7 +1,7 @@
 ---
 title: Журнал операций над документацией
 status: current
-verified: 2026-10-26
+verified: 2026-11-16
 sources: []
 audience: maintainer
 allow_version_literals: true
@@ -11,6 +11,13 @@ allow_version_literals: true
 
 Хронология: что сделано с документацией и почему. Новые записи сверху.
 Формат строки: дата · операция (ingest / update / lint / restructure) · что затронуто.
+
+## 2026-11-16 · update · подготовка выпуска 0.3.0
+
+`Unreleased` свёрнут в 0.3.0: CLI-сборщики, аддитивный набор формата со схемой 2,
+pass-through `lifecycle_plugins` и обновлённые правила чтения/записи. Номер версии остаётся
+в одном месте — `partest_atlas/__init__.py`; `setup.py` только вызывает setuptools и не
+дублирует метаданные. [[status]] синхронизирована с CHANGELOG.
 
 ## 2026-10-26 · update · находки qa: `attempts` и строгое чтение (не выпущено)
 

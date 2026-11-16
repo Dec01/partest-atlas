@@ -41,6 +41,15 @@ def test_an_empty_file_is_an_empty_configuration(tmp_path):
     assert cfgmod.load(tmp_path).raw == {}
 
 
+def test_lifecycle_plugins_are_passed_through_without_atlas_validation(tmp_path):
+    """Раздел принадлежит серверу: агент сохраняет его, но не навязывает свою схему."""
+    write(tmp_path, "lifecycle_plugins:\n  cleanup:\n    kind: command\n    future_key: value\n")
+    cfg = cfgmod.load(tmp_path)
+    assert cfg.section("lifecycle_plugins") == {
+        "cleanup": {"kind": "command", "future_key": "value"},
+    }
+
+
 def test_it_is_found_from_a_nested_directory(tmp_path):
     """Сборщик зовут и из корня, и из каталога тестов, и вручную откуда придётся."""
     write(tmp_path, "artifacts_dir: свои_артефакты\n")

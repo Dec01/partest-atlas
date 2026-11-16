@@ -49,8 +49,8 @@ partest-atlas collect container-logs
 команды текущего каталога в пути нет.
 
 Неизвестный ключ своего раздела `atlas.yaml` (`database.schemaz`) — строка-предупреждение в
-stderr; сбор идёт дальше. Чужие разделы (`reports`, `runner`… — сервер карты) не
-проверяются. `artifacts_dir` путём UNC — отказ (договор `atlas-config`).
+stderr; сбор идёт дальше. Чужие разделы (`reports`, `runner`, `lifecycle_plugins`… — сервер
+карты) не проверяются. `artifacts_dir` путём UNC — отказ (договор `atlas-config`).
 
 **Коды:** `0` — артефакт записан, в stdout одна строка: вид, сводка, путь. `1` — снять не
 удалось: **одна строка** в stderr (`partest-atlas collect <что>: причина`), артефакт не
