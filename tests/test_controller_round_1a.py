@@ -1,6 +1,6 @@
-"""Находки контролёров по шагу 1а (security, antagonist, qa, librarian): каждая — тестом.
+"""Проверки краевых случаев CLI и артефактов: каждый случай покрыт тестом.
 
-Номера в именах тестов не ставятся; находка названа в docstring.
+Номера в именах тестов не ставятся; суть случая названа в docstring.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ def test_a_broken_dsn_does_not_leak_the_password(проект, capsys, monkeypat
 
 
 def test_the_dsn_path_gets_a_connect_timeout(monkeypatch):
-    """Недоступный хост (VPN не поднят) держал команду минутами (antagonist г)."""
+    """Недоступный хост (VPN не поднят) держал команду минутами (разбор г)."""
     psycopg = pytest.importorskip("psycopg")
     увидено = {}
 
@@ -172,7 +172,7 @@ def test_read_only_rolls_back_when_its_own_statements_fail():
     assert запросы[-1] == postgres.END_SQL
 
 
-# --- antagonist 1: таблица — пара (схема, имя) ---------------------------------------------
+# --- разбор 1: таблица — пара (схема, имя) ---------------------------------------------
 
 
 def _col(schema, table, name="id"):
@@ -221,7 +221,7 @@ def test_effects_of_same_named_tables_in_two_schemas_stay_apart():
     assert "ORDER BY" in db_effects.STATS_SQL
 
 
-# --- antagonist 4: вывод на Windows не падает после записи ----------------------------------
+# --- разбор 4: вывод на Windows не падает после записи ----------------------------------
 
 
 def test_output_in_a_narrow_code_page_does_not_crash_after_writing(проект, monkeypatch, capsys):
@@ -240,7 +240,7 @@ def test_the_help_has_no_arrow_a_code_page_lacks():
     assert "→" not in inspect.getsource(cli._parser)
 
 
-# --- antagonist 5: ATLAS_DB_EFFECTS_ALL — дельта прогона ------------------------------------
+# --- разбор 5: ATLAS_DB_EFFECTS_ALL — дельта прогона ------------------------------------
 
 
 def test_all_means_one_session_delta_even_for_a_small_suite(monkeypatch):
@@ -250,7 +250,7 @@ def test_all_means_one_session_delta_even_for_a_small_suite(monkeypatch):
     assert effects_plugin.choose_mode(3, 12) == db_effects.TEST
 
 
-# --- решение координатора 3: keep_runs --------------------------------------------------------
+# --- решение по договору 3: keep_runs --------------------------------------------------------
 
 
 def _record(run_id, started, table="t"):
@@ -300,7 +300,7 @@ def test_keep_runs_is_read_from_the_plugin_section(monkeypatch, tmp_path):
         effects_plugin._state.clear()
 
 
-# --- решение координатора 2: правило имени области -------------------------------------------
+# --- решение по договору 2: правило имени области -------------------------------------------
 
 
 @pytest.mark.parametrize("имя", ["Склад", "a b", "..", ".", "a..b", "a/b", "", "x:y"])
@@ -328,7 +328,7 @@ def test_discover_scopes_skips_directories_with_bad_names(tmp_path):
     assert artifacts.discover_scopes(tmp_path) == [Scope("shop", "test")]
 
 
-# --- решение координатора 6: договор atlas-config --------------------------------------------
+# --- решение по договору 6: договор atlas-config --------------------------------------------
 
 
 def test_unknown_keys_of_own_sections_are_named_and_foreign_sections_left_alone(tmp_path):

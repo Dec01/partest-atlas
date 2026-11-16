@@ -175,6 +175,7 @@ def test_4_redaction_refuses_beyond_its_depth(tmp_path):
 # --- 5. UNC в любом написании -------------------------------------------------------------------
 
 
+# publish-ok: заведомо несуществующие UNC-пути для проверки отказа до обращения к сети
 @pytest.mark.parametrize("путь", [r"/\host\share", r"\/host/share", "//host/share", r"\\host\share"])
 def test_5_unc_in_any_spelling_is_refused(tmp_path, путь):
     assert artifacts.is_unc(путь)

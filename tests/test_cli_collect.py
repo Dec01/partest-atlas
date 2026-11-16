@@ -190,7 +190,7 @@ def test_a_bad_scope_in_the_environment_is_named_without_its_value(проект,
 def test_a_scope_that_would_leave_the_artifacts_directory_is_refused(проект, запустить, значение):
     """Пишем только в свой каталог артефактов: `..` или разделитель вывели бы запись наружу.
     Правило имени — у владельца формата (`artifacts.Scope`), то же, что у читающей
-    программы: `Склад` она не показала бы (находка librarian 3)."""
+    программы: `Склад` она не показала бы (найдено при разборе)."""
     _confpartest(проект, {"магазин": ["local", "spec/openapi.json"]})
     _спецификация(проект)
 
@@ -210,7 +210,7 @@ def test_a_scope_that_would_leave_the_artifacts_directory_is_refused(проек�
 
 def test_without_service_every_service_is_collected_into_one_artifact(проект, запустить):
     """Одна область — один `contract.openapi`, а служб несколько: операции всех служб с
-    ключом `service`, по службе — запись в `services` (находка antagonist 2)."""
+    ключом `service`, по службе — запись в `services` (найдено при разборе)."""
     _confpartest(проект, {"магазин": ["local", "spec/openapi.json"], "склад": ["local", "stock.json"]})
     _спецификация(проект)
     _спецификация(проект, "stock.json", ВТОРАЯ)

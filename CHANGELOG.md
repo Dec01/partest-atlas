@@ -113,7 +113,7 @@
   значение (`ATLAS_SYSTEM=`, `--system ""`) — «не задано». CLI, `config` и плагины (сразу
   при настройке) зовут его. `validate` называет негодную область в файле; `discover_scopes`
   и `scope_of` такие каталоги пропускают, `check` — называет их расхождением.
-- **Договор `atlas-config`** (`orchestra/repos.yaml`): `config.KNOWN_KEYS` — ключи своих
+- **Договор `atlas-config`**: `config.KNOWN_KEYS` — ключи своих
   разделов (`project`, `database`, `container_logs`, `db_effects`, `bus_flow`, `ui_flow`),
   `Config.unknown_keys()` называет неизвестные (`collect` и все три плагина); чужие разделы
   не проверяются и не отвергаются; свой раздел не объектом — `ConfigError`; `artifacts_dir`
