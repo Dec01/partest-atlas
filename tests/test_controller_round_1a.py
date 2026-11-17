@@ -67,6 +67,7 @@ def _artifact(корень, kind="contract.openapi"):
 
 def test_a_broken_dsn_does_not_leak_the_password(проект, capsys, monkeypatch):
     pytest.importorskip("psycopg")
+    # publish-ok: заведомо нерабочий DSN с вымышленным паролем для теста маскировки ошибки, не реальный секрет
     monkeypatch.setenv("DATABASE_URL", "app:S3cr3tPass@db.internal/prod")
     код, _, err = _run(capsys, "collect", "db-schema", "--root", проект)
     assert код == 1

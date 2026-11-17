@@ -19,11 +19,24 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 from urllib.parse import urlsplit
 
 KIND = "ui.flow"
+
+def base_nodeid(nodeid: str) -> str:
+    """Базовый тест без параметров последнего сегмента pytest nodeid.
+
+    ``variant`` сохраняет исходный nodeid целиком, а это поле связывает его с результатом,
+    где параметры могут быть вынесены отдельно. Скобки в имени файла не трогаем, а `::`
+    внутри параметра не считаем границей сегмента.
+    """
+    text = nodeid or ""
+    head, sep, _ = text.partition("::")
+    start = text.find("[", len(head) + 2) if sep else -1
+    return text[:start] if start >= 0 and text.endswith("]") else text
 
 #: Окно атрибуции по умолчанию: столько ждём запроса после действия.
 DEFAULT_WINDOW_MS = 2500
@@ -99,12 +112,18 @@ def attribute(
     window_ms: int = DEFAULT_WINDOW_MS,
     ignore_url: Sequence[str] = (),
     ignore_control: Sequence[str] = (),
+    nodeid: str = "",
+    run: Optional[Mapping[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Связать запросы с действиями. Действия и запросы — с отметками `ts` в миллисекундах.
 
     Запрос относится к **последнему предшествующему** действию. Запрос без действия перед
     ним не относится ни к чему и выбрасывается: приписать его первому попавшемуся
     действию значило бы выдумать связь.
+
+    *nodeid* — полный pytest nodeid текущего варианта. В связь попадают базовый ``nodeid``
+    без параметров и исходный ``variant``; *run* — метка :func:`artifacts.run_label`.
+    Все три поля необязательны: прежние вызовы и документы без них остаются годными.
     """
     ordered = sorted(
         (a for a in actions if not _ignored(a.get("control") or a.get("text") or "", ignore_control)),
@@ -123,23 +142,32 @@ def attribute(
         gap = ts - action.get("ts", 0)
         if gap > window_ms:
             continue
-        out.append(
-            {
-                "screen": norm_screen(action.get("screen")),
-                "control": norm_testid(action.get("control")),
-                "action": action.get("type") or "click",
-                "method": str(call.get("method") or "GET").upper(),
-                "path": norm_path(url),
-                "status": call.get("status"),
-                "gapMs": int(gap),
-                "confidence": confidence_for(gap),
-            }
-        )
+        link = {
+            "screen": norm_screen(action.get("screen")),
+            "control": norm_testid(action.get("control")),
+            "action": action.get("type") or "click",
+            "method": str(call.get("method") or "GET").upper(),
+            "path": norm_path(url),
+            "status": call.get("status"),
+            "gapMs": int(gap),
+            "confidence": confidence_for(gap),
+        }
+        if nodeid:
+            link["nodeid"] = base_nodeid(nodeid)
+            link["variant"] = nodeid
+        if run is not None:
+            link["run"] = dict(run)
+        out.append(link)
     return out
 
 
 def _ignored(value: str, patterns: Sequence[str]) -> bool:
     return any(p and p in value for p in patterns)
+
+
+def _run_key(run: Any) -> str:
+    """Стабильный хешируемый ключ необязательной метки прогона."""
+    return json.dumps(run, sort_keys=True, ensure_ascii=False, default=str)
 
 
 def merge(links: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
@@ -148,13 +176,18 @@ def merge(links: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     Худшую, а не лучшую: если та же связь один раз наблюдалась прямо, а десять раз — по
     окну, честно сказать, что она в основном угадана. Выбрать лучшую значило бы
     повысить доверие к связи одним удачным наблюдением.
+
+    ``nodeid``, ``variant`` и ``run`` входят в ключ: одинаковые клики разных вариантов
+    или прогонов не превращаются в одно наблюдение. У старых записей этих ключей нет,
+    и они по-прежнему схлопываются по пятёрке «экран, элемент, действие, метод, путь».
     """
     buckets: Dict[tuple, Dict[str, Any]] = {}
     for link in links:
         # Экран — нормализованный и здесь: связи, собранные не через `attribute`, иначе
         # разошлись бы на `#/orders/1` и `#/orders/2`.
         key = (norm_screen(link.get("screen")), link.get("control"), link.get("action"),
-               link.get("method"), link.get("path"))
+               link.get("method"), link.get("path"), link.get("nodeid"), link.get("variant"),
+               _run_key(link.get("run")))
         row = buckets.get(key)
         if row is None:
             row = {
@@ -162,11 +195,19 @@ def merge(links: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
                 "method": key[3], "path": key[4],
                 "count": 0, "confidence": "direct",
             }
+            for field in ("nodeid", "variant", "run"):
+                if field in link:
+                    value = link[field]
+                    row[field] = dict(value) if field == "run" and isinstance(value, Mapping) else value
             buckets[key] = row
         row["count"] += 1
         if link.get("confidence") == "window":
             row["confidence"] = "window"
-    return sorted(buckets.values(), key=lambda r: (r["screen"] or "", r["control"] or "", r["path"]))
+    return sorted(
+        buckets.values(),
+        key=lambda r: (r["screen"] or "", r["control"] or "", r["path"],
+                       str(r.get("nodeid") or ""), str(r.get("variant") or ""), _run_key(r.get("run"))),
+    )
 
 
 def build(links: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -220,15 +261,18 @@ class Recorder:
     """Пишет действия и запросы одной страницы. Тонкий слой: правила связывания — выше.
 
     Ни одна ошибка страницы не должна ронять прогон: сбор карты не то, ради чего проект
-    гоняет UI-тесты. Поэтому обращения к странице обёрнуты, а неудача означает «действий
-    не забрали», а не «тест упал».
+    гоняет UI-тесты. Ошибку drain перехватывает pytest-плагин и отменяет запись неполного
+    артефакта; молча выдать такой снимок за полный нельзя.
     """
 
     def __init__(self, *, window_ms: int = DEFAULT_WINDOW_MS,
-                 ignore_url: Sequence[str] = (), ignore_control: Sequence[str] = ()) -> None:
+                 ignore_url: Sequence[str] = (), ignore_control: Sequence[str] = (),
+                 nodeid: str = "", run: Optional[Mapping[str, Any]] = None) -> None:
         self.window_ms = window_ms
         self.ignore_url = list(ignore_url)
         self.ignore_control = list(ignore_control)
+        self.nodeid = nodeid
+        self.run = dict(run) if run is not None else None
         self.actions: List[Dict[str, Any]] = []
         self.calls: List[Dict[str, Any]] = []
 
@@ -260,10 +304,7 @@ class Recorder:
             pass
 
     def pull_actions(self, page: Any) -> None:
-        try:
-            found = page.evaluate("window.__atlasFlow && window.__atlasFlow.take()")
-        except Exception:
-            return
+        found = page.evaluate("window.__atlasFlow && window.__atlasFlow.take()")
         for action in found or []:
             self.actions.append(action)
 
@@ -275,6 +316,8 @@ class Recorder:
             window_ms=self.window_ms,
             ignore_url=self.ignore_url,
             ignore_control=self.ignore_control,
+            nodeid=self.nodeid,
+            run=self.run,
         )
         self.actions.clear()
         self.calls.clear()

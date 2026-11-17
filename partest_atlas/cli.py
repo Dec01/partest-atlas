@@ -324,6 +324,13 @@ def _summary_text(what: str, payload: Dict[str, Any]) -> str:
             f"tables {stats.get('tables')}, columns {stats.get('columns')}, "
             f"foreign keys {stats.get('foreignKeys')} · schemas {schemas}",
         )
+    if what == "specs":
+        return t(
+            f"требований {stats.get('requirements')}, источников {stats.get('sources')}, "
+            f"с якорями {stats.get('withAnchors')}",
+            f"requirements {stats.get('requirements')}, sources {stats.get('sources')}, "
+            f"with anchors {stats.get('withAnchors')}",
+        )
     return t(
         f"контейнеров с находками {stats.get('containers')}, таблиц {stats.get('tables')}, "
         f"топиков {stats.get('topics')}",
@@ -333,23 +340,25 @@ def _summary_text(what: str, payload: Dict[str, Any]) -> str:
 
 
 #: Подкоманды `collect` в порядке, в котором их собирает голый `collect`.
-COLLECTORS = ("openapi", "db-schema", "container-logs")
+COLLECTORS = ("openapi", "db-schema", "container-logs", "specs")
 
 
 def _module(what: str) -> Any:
-    from partest_atlas.collect import container_logs, db_schema, openapi  # noqa: PLC0415
+    from partest_atlas.collect import container_logs, db_schema, openapi, specs  # noqa: PLC0415
 
-    return {"openapi": openapi, "db-schema": db_schema, "container-logs": container_logs}[what]
+    return {"openapi": openapi, "db-schema": db_schema, "container-logs": container_logs,
+            "specs": specs}[what]
 
 
 def _configured(what: str, cfg: Any, root: Optional[Path]) -> bool:
-    """Настроен ли сборщик: `confpartest.py` в каталоге проекта, раздел `database`, раздел
-    `container_logs`. Голый `collect` ненастроенное пропускает, а не роняет."""
+    """Настроен ли сборщик. Голый `collect` ненастроенное пропускает, а не роняет."""
     if what == "openapi":
         return ((root or cfg.root) / "confpartest.py").is_file()
     if what == "db-schema":
         return "database" in cfg.raw
-    return "container_logs" in cfg.raw
+    if what == "container-logs":
+        return "container_logs" in cfg.raw
+    return "specs" in cfg.raw
 
 
 def _collect_one(what: str, args: argparse.Namespace, cfg: Any, root: Optional[Path],
@@ -543,14 +552,14 @@ def _parser() -> argparse.ArgumentParser:
         description=t(
             "Пишет только в <artifacts_dir>/<система>/<контур>/. Без подкоманды — всё "
             "настроенное (openapi, если есть confpartest.py; db-schema, если есть раздел "
-            "database; container-logs, если есть раздел container_logs), ненастроенное "
-            "пропускается одной строкой. Неудача — одна строка в stderr и код 1; артефакт "
-            "тогда не пишется.",
+            "database; container-logs, если есть раздел container_logs; specs, если есть "
+            "раздел specs), ненастроенное пропускается одной строкой. Неудача — одна строка "
+            "в stderr и код 1; артефакт тогда не пишется.",
             "Writes only to <artifacts_dir>/<system>/<env>/. Without a subcommand — "
             "everything configured (openapi if there is confpartest.py; db-schema if there is "
-            "a database section; container-logs if there is a container_logs section), the "
-            "rest is skipped with one line. A failure is one line on stderr and exit code 1; "
-            "no artifact is written then.",
+            "a database section; container-logs if there is a container_logs section; specs if "
+            "there is a specs section), the rest is skipped with one line. A failure is one "
+            "line on stderr and exit code 1; no artifact is written then.",
         ),
     )
     what = p_collect.add_subparsers(dest="what", required=False)
@@ -592,6 +601,12 @@ def _parser() -> argparse.ArgumentParser:
         parents=[common],
         help=t("связи из журналов контейнеров -> containers.logs; нужен container_logs.source",
                "links from container logs -> containers.logs; needs container_logs.source"),
+    )
+    what.add_parser(
+        "specs",
+        parents=[common],
+        help=t("требования из .docx раздела specs -> specs.requirements",
+               "requirements from the .docx files in the specs section -> specs.requirements"),
     )
     return parser
 

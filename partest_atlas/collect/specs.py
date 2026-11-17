@@ -17,7 +17,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set
+
+from partest_atlas import artifacts
+from partest_atlas.artifacts import Scope
+from partest_atlas.config import Config, load, non_negative
+from partest_atlas.lang import t
 
 KIND = "specs.requirements"
 
@@ -238,6 +244,7 @@ def slice_requirements(
     styles: Mapping[str, int],
     prefix: str = "REQ",
     min_chars: int = 0,
+    seen: Optional[Dict[str, int]] = None,
 ) -> List[Requirement]:
     """Заголовок и всё до следующего заголовка того же или старшего уровня.
 
@@ -245,6 +252,9 @@ def slice_requirements(
     целиком, а у «6.5» — своё, более узкое. Одно предложение попадает в два требования,
     и это верно: они разной крупности, и карта показывает их на разных уровнях.
     Рядом лежит `lead` — собственный текст раздела до первого подзаголовка.
+    *seen* — общий счётчик идентификаторов при нарезке нескольких документов: повтор
+    получает следующий суффикс `~2`, `~3`… в порядке файлов и заголовков. Без аргумента
+    поведение одного документа прежнее.
     """
     heads: List[tuple] = []
     for i, block in enumerate(blocks):
@@ -257,7 +267,7 @@ def slice_requirements(
         heads.append((i, level, num, title))
 
     out: List[Requirement] = []
-    seen: Dict[str, int] = {}
+    seen = {} if seen is None else seen
     for pos, (idx, level, num, title) in enumerate(heads):
         end = len(blocks)
         children = 0
@@ -275,14 +285,17 @@ def slice_requirements(
         lead = "\n\n".join(b.text for b in blocks[idx + 1:min(own_end, end)]).strip()
 
         section = num or _slug(title)
-        rid = f"{prefix}-{section}"
+        base = f"{prefix}-{section}"
+        rid = base
         # Два раздела с одним номером — не редкость в живых документах. Молча слить их
-        # значило бы потерять одно требование целиком.
-        if rid in seen:
-            seen[rid] += 1
-            rid = f"{rid}~{seen[rid]}"
-        else:
-            seen[rid] = 1
+        # значило бы потерять одно требование целиком. Проверяем и исходный ID, и каждый
+        # сгенерированный суффикс: такой ID мог уже встретиться как естественный slug.
+        suffix = seen.get(base, 1)
+        while rid in seen:
+            suffix += 1
+            rid = f"{base}~{suffix}"
+        seen[base] = suffix
+        seen[rid] = 1
 
         out.append(
             Requirement(
@@ -369,3 +382,183 @@ def build(requirements: Sequence[Requirement]) -> Dict[str, Any]:
             "withAnchors": sum(1 for r in rows if r["anchors"]),
         },
     }
+
+
+DEFAULT_HEADING_STYLES = {
+    "heading1": 1,
+    "heading2": 2,
+    "heading3": 3,
+    "heading 1": 1,
+    "heading 2": 2,
+    "heading 3": 3,
+}
+
+
+@dataclass(frozen=True)
+class _SpecFile:
+    file: str
+    source: str
+    prefix: Optional[str]
+
+
+def _files(section: Mapping[str, Any]) -> List[_SpecFile]:
+    raw = section.get("files")
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(t(
+            "specs.files: ожидался непустой список путей к .docx или объектов "
+            "{file, label, prefix}",
+            "specs.files: expected a non-empty list of .docx paths or "
+            "{file, label, prefix} objects",
+        ))
+
+    out: List[_SpecFile] = []
+    for index, item in enumerate(raw):
+        where = f"specs.files[{index}]"
+        if isinstance(item, str):
+            if not item.strip():
+                raise ValueError(t(f"{where}: ожидался непустой путь строкой",
+                                   f"{where}: expected a non-empty path string"))
+            out.append(_SpecFile(file=item, source=item, prefix=None))
+            continue
+        if not isinstance(item, Mapping):
+            raise ValueError(t(
+                f"{where}: ожидался путь строкой или объект {{file, label, prefix}}",
+                f"{where}: expected a path string or a {{file, label, prefix}} object",
+            ))
+        unknown = set(item) - {"file", "label", "prefix"}
+        if unknown:
+            names = ", ".join(sorted(str(key) for key in unknown))
+            raise ValueError(t(f"{where}: неизвестные ключи: {names}",
+                               f"{where}: unknown keys: {names}"))
+        values = {}
+        for key in ("file", "label", "prefix"):
+            value = item.get(key)
+            if key in item and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(t(f"{where}.{key}: ожидалась непустая строка",
+                                   f"{where}.{key}: expected a non-empty string"))
+            values[key] = value
+        if not isinstance(values["file"], str):
+            raise ValueError(t(f"{where}.file: ожидался непустой путь строкой",
+                               f"{where}.file: expected a non-empty path string"))
+        out.append(_SpecFile(
+            file=values["file"],
+            source=values["label"] if values["label"] is not None else values["file"],
+            prefix=values["prefix"],
+        ))
+    return out
+
+
+def _styles(section: Mapping[str, Any]) -> Dict[str, int]:
+    raw = section.get("heading_styles")
+    if raw is None:
+        return dict(DEFAULT_HEADING_STYLES)
+    if not isinstance(raw, Mapping) or not raw:
+        raise ValueError(t(
+            "specs.heading_styles: ожидался непустой словарь «стиль: уровень»",
+            "specs.heading_styles: expected a non-empty mapping of style to level",
+        ))
+    if any(not isinstance(name, str) or not name.strip()
+           or not isinstance(level, int) or isinstance(level, bool) or level < 1
+           for name, level in raw.items()):
+        raise ValueError(t(
+            "specs.heading_styles: стили — непустые строки, уровни — положительные целые",
+            "specs.heading_styles: styles must be non-empty strings and levels positive integers",
+        ))
+    return {name.lower(): level for name, level in raw.items()}
+
+
+def _synonyms(section: Mapping[str, Any]) -> Mapping[str, str]:
+    raw = section.get("synonyms")
+    if raw is None:
+        raw = {}
+    if (not isinstance(raw, Mapping)
+            or any(not isinstance(word, str) or not isinstance(table, str)
+                   for word, table in raw.items())):
+        raise ValueError(t(
+            "specs.synonyms: ожидался словарь строк «слово: таблица»",
+            "specs.synonyms: expected a string mapping of word to table",
+        ))
+    return raw
+
+
+def _tables(cfg: Config, scope: Scope) -> Set[str]:
+    schema = artifacts.read(cfg.path_for("db.schema", scope=scope))
+    return {
+        str(table["name"])
+        for database in schema.get("databases") or []
+        if isinstance(database, Mapping)
+        for table in database.get("tables") or []
+        if isinstance(table, Mapping) and table.get("name")
+    }
+
+
+def collect(config: Optional[Config] = None, *, scope: Optional[Scope] = None) -> Dict[str, Any]:
+    """Прочитать все настроенные `.docx` и слепить содержание артефакта.
+
+    Все файлы читаются до записи: ошибка в любом из них не оставляет частичный артефакт.
+    Относительные пути разрешаются от каталога `atlas.yaml`. В `source` сохраняется `label`
+    записи, а если его нет — путь как объявлен. Список таблиц берётся из уже снятого
+    `db.schema` той же области; без него ставятся только якоря API.
+    """
+    cfg = config or load()
+    where = scope or cfg.scope
+    section = cfg.section("specs")
+    files = _files(section)
+    styles = _styles(section)
+    prefix = section.get("prefix", "REQ")
+    if not isinstance(prefix, str) or not prefix.strip():
+        raise ValueError(t("specs.prefix: ожидалась непустая строка",
+                           "specs.prefix: expected a non-empty string"))
+    min_chars = non_negative(section, "min_chars", 0, int, where="specs")
+    synonyms = _synonyms(section)
+    api_prefix = cfg.project.get("api_prefix") or ""
+    if not isinstance(api_prefix, str):
+        raise ValueError(t("project.api_prefix: ожидалась строка",
+                           "project.api_prefix: expected a string"))
+
+    requirements: List[Requirement] = []
+    texts: List[str] = []
+    seen: Dict[str, int] = {}
+    for index, entry in enumerate(files):
+        # Общий ресурс отклоняется до `Path.is_file()` и `ZipFile`: обе операции на UNC
+        # могут уйти в SMB. Проверка и текст отказа принадлежат владельцу формата.
+        artifacts._refuse_unc(entry.file, f"specs.files[{index}]")
+        path = Path(entry.file)
+        if not path.is_absolute():
+            path = cfg.root / path
+        if not path.is_file():
+            raise ValueError(t(f"specs.files: нет файла {entry.file}",
+                               f"specs.files: no such file: {entry.file}"))
+        try:
+            blocks = read_docx(path)
+        except Exception as exc:
+            raise ValueError(t(f"specs.files: {entry.file} не прочитан — {exc}",
+                               f"specs.files: cannot read {entry.file} — {exc}")) from exc
+        texts.extend(block.text for block in blocks)
+        requirements.extend(slice_requirements(
+            blocks,
+            source=entry.source,
+            styles=styles,
+            prefix=entry.prefix if entry.prefix is not None else prefix,
+            min_chars=min_chars,
+            seen=seen,
+        ))
+
+    roots = api_roots(texts, api_prefix)
+    tables = _tables(cfg, where)
+    for requirement in requirements:
+        requirement.anchors = extract_anchors(
+            requirement.text, api_prefix=api_prefix, tables=tables, synonyms=synonyms, roots=roots,
+        )
+    return build(requirements)
+
+
+def write(config: Optional[Config] = None, *, scope: Optional[Scope] = None) -> Dict[str, Any]:
+    """Снять требования и положить артефакт. Возвращает записанное содержание."""
+    cfg = config or load()
+    where = scope or cfg.scope
+    payload = collect(cfg, scope=where)
+    return artifacts.write(
+        cfg.path_for(KIND, scope=where), KIND, payload, scope=where,
+        collector="partest-atlas/specs",
+    )

@@ -1,8 +1,8 @@
 ---
 title: Как подготовить проект с автотестами к сбору
 status: current
-verified: 2026-10-26
-sources: [partest_atlas/artifacts.py, partest_atlas/cli.py, partest_atlas/config.py, pyproject.toml]
+verified: 2026-11-17
+sources: [partest_atlas/artifacts.py, partest_atlas/cli.py, partest_atlas/config.py, partest_atlas/collect/specs.py, pyproject.toml]
 audience: user
 ---
 
@@ -71,9 +71,9 @@ project:
 artifacts_dir: atlas         # куда складывать; относительно каталога atlas.yaml
 ```
 
-`project.name` и `project.api_prefix` этот пакет не читает: имя показывает сервер карты, а
-префикс API разбору спецификаций передаёт вызывающий код. Ключи названы в договоре, чтобы
-`collect` не считал их опечаткой.
+`project.name` этот пакет не читает: имя показывает сервер карты. `project.api_prefix`
+использует `partest-atlas collect specs` для якорей API в требованиях. Оба ключа названы
+в договоре, чтобы `collect` не считал их опечаткой.
 
 Раздел базы и раздел шины — пример:
 
@@ -142,14 +142,15 @@ ATLAS_DB_EFFECTS=1 ATLAS_DB_EFFECTS_ALL=1 ATLAS_BUS_FLOW=1 pytest
 `ATLAS_DB_EFFECTS=1` без `ALL`.
 
 Наблюдения, которые прогона не требуют (схема базы, контракт, спецификации), снимаются
-отдельно и живут дольше: их не нужно пересобирать на каждый прогон. Контракт, схема базы и
-связи из журналов снимаются командой, без кода в проекте:
+отдельно и живут дольше: их не нужно пересобирать на каждый прогон. Контракт, схема базы,
+спецификации и связи из журналов снимаются командой, без кода в проекте:
 
 ```bash
 partest-atlas collect                # всё настроенное, ненастроенное пропускается
 partest-atlas collect openapi        # из confpartest.swagger_files, все службы
 partest-atlas collect db-schema      # раздел database; schemas: auto — все несистемные
 partest-atlas collect container-logs # только при container_logs.source
+partest-atlas collect specs          # DOCX из specs.files, якоря API и таблиц
 ```
 
 Неудача — одна строка в stderr и код 1, артефакт тогда не пишется. Что именно берётся и

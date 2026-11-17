@@ -1,7 +1,7 @@
 ---
 title: Журнал операций над документацией
 status: current
-verified: 2026-11-16
+verified: 2026-11-17
 sources: []
 audience: maintainer
 allow_version_literals: true
@@ -11,6 +11,13 @@ allow_version_literals: true
 
 Хронология: что сделано с документацией и почему. Новые записи сверху.
 Формат строки: дата · операция (ingest / update / lint / restructure) · что затронуто.
+
+## 2026-11-17 · update · подготовка кандидата 0.4.0
+
+`Невыпущено` свёрнуто в 0.4.0: `collect specs`, provenance и корректные пустые
+артефакты `ui.flow`, глобально уникальные ID и отказ UNC в `specs`. Номер версии остаётся
+в одном месте — `partest_atlas/__init__.py`. 0.3.0 — последняя опубликованная версия;
+0.4.0 подготовлена, но ещё не выпущена. [[status]] синхронизирована с CHANGELOG.
 
 ## 2026-11-16 · update · подготовка выпуска 0.3.0
 

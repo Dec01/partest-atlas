@@ -1,8 +1,8 @@
 ---
 title: Контракт артефактов
 status: current
-verified: 2026-10-26
-sources: [partest_atlas/artifacts.py, partest_atlas/__init__.py, partest_atlas/cli.py]
+verified: 2026-11-17
+sources: [partest_atlas/artifacts.py, partest_atlas/__init__.py, partest_atlas/cli.py, partest_atlas/collect/ui_flow.py, partest_atlas/collect/specs.py]
 audience: agent
 ---
 
@@ -71,7 +71,7 @@ audience: agent
 
 `load.profile` в таблице нет: формат вида не согласован, и его пока никто не пишет.
 
-Аддитивные поля схемы 2, появившиеся без смены версии (`CHANGELOG.md`, Unreleased):
+Аддитивные поля схемы 2, появившиеся без смены версии (`CHANGELOG.md`):
 
 - `db.effects` — `schema` рядом с `table`: таблица — пара (схема, имя).
 - `db.schema` — `schema` у цели внешнего ключа (`fk`).
@@ -88,7 +88,16 @@ audience: agent
   по-прежнему только контейнеры с находками.
 - `contract.openapi` — `info`, `source`, `services`, `service` у операции
   ([[components/collect]], «Несколько служб»).
-- `ui.flow` — `screen` нормализован: `#/orders/42?tab=1` → `/#/orders/{id}`.
+- `ui.flow` — `screen` нормализован: `#/orders/42?tab=1` → `/#/orders/{id}`. У связи
+  появились необязательные `nodeid` (pytest nodeid без параметров последнего сегмента),
+  `variant` (полный nodeid варианта) и `run: {id, startedAt}` (`run_label()`). Они входят
+  в ключ `merge()`: одинаковые действия разных вариантов и прогонов не схлопываются.
+  Документы без provenance читаются и сливаются по прежнему ключу; остальные поля и
+  сводка не изменились, поэтому схема остаётся 2. При включённом `ATLAS_UI_FLOW` нулевой
+  результат прогона с исполненными тестами и полностью прочитанными страницами записывается
+  как текущий `links: []` с нулевой сводкой при коде pytest `OK` или `TESTS_FAILED`.
+  `--collect-only`, прочие коды завершения (usage, interrupted, internal) и неудачный drain
+  прежний файл сохраняют.
 
 Что внутри `runner.history` и что значит срез покрытия в его записях — [[components/history]].
 
@@ -118,9 +127,10 @@ atlas/<система>/<контур>/db_schema.json
 проходит. `validate` называет негодную область в файле, `discover_scopes` и `scope_of`
 такие каталоги пропускают, `check` называет их расхождением.
 
-**UNC не принимается** (`is_unc`): `artifacts_dir` в `config`, каталог `discover_scopes` и
-путь `inspect` — общий ресурс сети в любом написании разделителей (`\\host\share`,
-`//host/share`, `/\host\share`, `\/host/share`) — `ValueError`/`ConfigError`.
+**UNC не принимается** (`is_unc`): `artifacts_dir` в `config`, каталог `discover_scopes`,
+путь `inspect` и элементы `specs.files` — общий ресурс сети в любом написании разделителей
+(`\\host\share`, `//host/share`, `/\host\share`, `\/host/share`) —
+`ValueError`/`ConfigError`. У `specs.files` отказ происходит до `is_file` и `ZipFile`.
 
 **Область в файле обязана совпадать с каталогом.** `validate(doc, scope=…)`, `inspect` и
 `partest-atlas check` сверяют их: файл, перенесённый в каталог другого контура, —

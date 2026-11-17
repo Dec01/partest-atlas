@@ -12,6 +12,7 @@ import json
 import socket
 import sys
 import textwrap
+import zipfile
 
 import pytest
 
@@ -747,6 +748,242 @@ def test_a_source_that_returns_no_mapping_is_refused(проект, запуст�
 
     assert код == 1
     assert "str" in _одна_строка(err)
+
+
+# --- collect specs -----------------------------------------------------------------------
+
+
+def _требования_docx(корень, *разделы, имя="docs/requirements.docx"):
+    путь = корень / имя
+    путь.parent.mkdir(parents=True, exist_ok=True)
+    куски = []
+    for заголовок, стиль, текст in разделы:
+        куски.append(f'<w:p><w:pPr><w:pStyle w:val="{стиль}"/></w:pPr>'
+                     f'<w:r><w:t>{заголовок}</w:t></w:r></w:p>')
+        куски.append(f'<w:p><w:r><w:t>{текст}</w:t></w:r></w:p>')
+    xml = ('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+           f'<w:body>{"".join(куски)}</w:body></w:document>')
+    with zipfile.ZipFile(путь, "w") as архив:
+        архив.writestr("word/document.xml", xml)
+    return путь
+
+
+def _настройки_specs(корень, файл="docs/requirements.docx", synonyms=""):
+    _atlas_yaml(корень, f"""
+        project:
+          api_prefix: /api/v1
+        specs:
+          files: [{файл}]
+          heading_styles: {{Heading1: 1, Heading2: 2}}
+          prefix: REQ
+          min_chars: 0
+        {synonyms}
+    """)
+
+
+def test_specs_from_a_real_docx_write_api_and_table_anchors(проект, запустить):
+    _требования_docx(
+        проект,
+        ("1 Общие", "Heading1", "Полный путь /api/v1/orders/1 меняет заказы"),
+        ("1.1 Деталь", "Heading2", "Относительный путь /orders/2"),
+    )
+    _настройки_specs(проект, synonyms="  synonyms: {заказы: orders}")
+    область = artifacts.Scope(system="library", env="qa")
+    artifacts.write(
+        _артефакт(проект, "db.schema", область.system, область.env),
+        "db.schema",
+        {"databases": [{"key": "primary", "tables": [{"name": "orders"}]}]},
+        scope=область,
+    )
+
+    код, out, err = запустить(
+        "collect", "specs", "--root", проект, "--system", область.system, "--env", область.env,
+    )
+
+    assert код == 0, err
+    doc = artifacts.read(_артефакт(проект, "specs.requirements", область.system, область.env))
+    assert artifacts.validate(doc, kind="specs.requirements", scope=область) == []
+    assert doc["collector"] == "partest-atlas/specs"
+    assert doc["stats"] == {"requirements": 2, "sources": 1, "withAnchors": 2}
+    общее, деталь = doc["requirements"]
+    assert общее["source"] == "docs/requirements.docx"
+    assert общее["anchors"] == {"api": ["/api/v1/orders/{id}"], "table": ["orders"]}
+    # Корень orders известен по полному пути из другого раздела того же документа;
+    # само имя orders совпадает с таблицей из снятой схемы.
+    assert деталь["anchors"] == {"api": ["/api/v1/orders/{id}"], "table": ["orders"]}
+    assert "требований 2" in out and "источников 1" in out and "с якорями 2" in out
+
+
+def test_specs_api_root_from_one_docx_anchors_a_relative_path_in_another(проект, запустить):
+    _требования_docx(
+        проект, ("1 Источник", "Heading1", "Полный путь /api/v1/orders/1"), имя="docs/a.docx",
+    )
+    _требования_docx(
+        проект, ("2 Потребитель", "Heading1", "Относительный путь /orders/2"), имя="docs/b.docx",
+    )
+    _atlas_yaml(проект, """
+        project:
+          api_prefix: /api/v1
+        specs:
+          files: [docs/a.docx, docs/b.docx]
+          heading_styles: {Heading1: 1}
+    """)
+
+    код, _, err = запустить("collect", "specs", "--root", проект)
+
+    assert код == 0, err
+    doc = artifacts.read(_артефакт(проект, "specs.requirements"))
+    assert [row["anchors"] for row in doc["requirements"]] == [
+        {"api": ["/api/v1/orders/{id}"]},
+        {"api": ["/api/v1/orders/{id}"]},
+    ]
+
+
+def test_bare_collect_includes_configured_specs_without_a_schema(проект, запустить):
+    _требования_docx(проект, ("1 Запрос", "Heading1", "Вызов /api/v1/items/1"))
+    _настройки_specs(проект)
+
+    код, out, err = запустить("--json", "collect", "--root", проект)
+
+    assert код == 0, err
+    doc = artifacts.read(_артефакт(проект, "specs.requirements"))
+    assert doc["requirements"][0]["anchors"] == {"api": ["/api/v1/items/{id}"]}
+    assert "table" not in doc["requirements"][0]["anchors"]
+    результат = json.loads(out)["results"]
+    assert len(результат) == 1
+    assert результат[0]["collector"] == "specs"
+    assert результат[0]["kind"] == "specs.requirements"
+    assert результат[0]["stats"] == {"requirements": 1, "sources": 1, "withAnchors": 1}
+    assert результат[0]["path"].endswith("specs.json")
+
+
+def test_specs_file_object_overrides_source_and_prefix(проект, запустить):
+    _требования_docx(
+        проект, ("17 Структура", "Heading1", "Описание структуры"), имя="docs/custom.docx",
+    )
+    _atlas_yaml(проект, """
+        specs:
+          files:
+            - file: docs/custom.docx
+              label: Структура данных
+              prefix: DATA
+          heading_styles: {Heading1: 1}
+          prefix: REQ
+    """)
+
+    код, _, err = запустить("collect", "specs", "--root", проект)
+
+    assert код == 0, err
+    doc = artifacts.read(_артефакт(проект, "specs.requirements"))
+    assert artifacts.validate(doc) == []
+    assert [(row["id"], row["source"]) for row in doc["requirements"]] == [
+        ("DATA-17", "Структура данных"),
+    ]
+
+
+def test_specs_files_mix_strings_and_objects_with_defaults(проект, запустить):
+    for имя, номер in (("a.docx", 1), ("b.docx", 2), ("c.docx", 3)):
+        _требования_docx(
+            проект, (f"{номер} Раздел", "Heading1", "Текст требования"), имя=f"docs/{имя}",
+        )
+    _atlas_yaml(проект, """
+        specs:
+          files:
+            - docs/a.docx
+            - file: docs/b.docx
+            - file: docs/c.docx
+              label: Третий документ
+          heading_styles: {Heading1: 1}
+          prefix: PLAN
+    """)
+
+    код, _, err = запустить("collect", "specs", "--root", проект)
+
+    assert код == 0, err
+    doc = artifacts.read(_артефакт(проект, "specs.requirements"))
+    assert [(row["id"], row["source"]) for row in doc["requirements"]] == [
+        ("PLAN-1", "docs/a.docx"),
+        ("PLAN-2", "docs/b.docx"),
+        ("PLAN-3", "Третий документ"),
+    ]
+
+
+def test_specs_accepts_an_absolute_local_docx(проект, запустить):
+    путь = _требования_docx(проект, ("4 Локальный", "Heading1", "Текст требования"))
+    _atlas_yaml(проект, f"""
+        specs:
+          files: [{json.dumps(str(путь))}]
+          heading_styles: {{Heading1: 1}}
+    """)
+
+    код, _, err = запустить("collect", "specs", "--root", проект)
+
+    assert код == 0, err
+    doc = artifacts.read(_артефакт(проект, "specs.requirements"))
+    assert [row["id"] for row in doc["requirements"]] == ["REQ-4"]
+
+
+def test_specs_duplicate_local_ids_get_deterministic_across_file_suffixes(проект, запустить):
+    for имя, текст in (("a.docx", "Первый документ"), ("b.docx", "Второй документ")):
+        _требования_docx(проект, ("1 Требование", "Heading1", текст), имя=f"docs/{имя}")
+    _atlas_yaml(проект, """
+        specs:
+          files: [docs/a.docx, docs/b.docx]
+          heading_styles: {Heading1: 1}
+          prefix: REQ
+    """)
+
+    код, _, err = запустить("collect", "specs", "--root", проект)
+
+    assert код == 0, err
+    путь = _артефакт(проект, "specs.requirements")
+    doc = artifacts.read(путь)
+    assert [(row["id"], row["text"]) for row in doc["requirements"]] == [
+        ("REQ-1", "Первый документ"), ("REQ-1~2", "Второй документ"),
+    ]
+
+    assert запустить("collect", "specs", "--root", проект)[0] == 0
+    assert [row["id"] for row in artifacts.read(путь)["requirements"]] == ["REQ-1", "REQ-1~2"]
+
+
+def test_a_missing_specs_file_does_not_replace_the_previous_artifact(проект, запустить):
+    _требования_docx(проект, ("1 Старое", "Heading1", "Текст требования"))
+    _настройки_specs(проект)
+    assert запустить("collect", "specs", "--root", проект)[0] == 0
+    путь = _артефакт(проект, "specs.requirements")
+    было = путь.read_bytes()
+    _настройки_specs(проект, файл="docs/missing.docx")
+
+    код, out, err = запустить("collect", "specs", "--root", проект)
+
+    assert код == 1
+    assert out == ""
+    строка = _одна_строка(err)
+    assert "specs.files" in строка and "docs/missing.docx" in строка
+    assert путь.read_bytes() == было
+
+
+def test_a_broken_second_docx_preserves_the_previous_specs_artifact_bytes(проект, запустить):
+    for имя, номер in (("a.docx", 1), ("b.docx", 2)):
+        _требования_docx(
+            проект, (f"{номер} Требование", "Heading1", "Текст требования"), имя=f"docs/{имя}",
+        )
+    _atlas_yaml(проект, """
+        specs:
+          files: [docs/a.docx, docs/b.docx]
+          heading_styles: {Heading1: 1}
+    """)
+    assert запустить("collect", "specs", "--root", проект)[0] == 0
+    path = _артефакт(проект, "specs.requirements")
+    before = path.read_bytes()
+    (проект / "docs/b.docx").write_bytes(b"not a zip archive")
+
+    код, out, err = запустить("collect", "specs", "--root", проект)
+
+    assert код == 1
+    assert out == ""
+    assert "docs/b.docx" in _одна_строка(err)
+    assert path.read_bytes() == before
 
 
 # --- язык вывода -------------------------------------------------------------------------

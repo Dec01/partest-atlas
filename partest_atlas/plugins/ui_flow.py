@@ -51,15 +51,17 @@ def pytest_configure(config) -> None:
         ignore_url=list(section.get("ignore_url") or []),
         ignore_control=list(section.get("ignore_control") or []),
         links=[],
+        run=artifacts.run_label(),
     )
 
 
 @pytest.fixture()
-def atlas_ui_flow():
+def atlas_ui_flow(request):
     """Фабрика записи: ``recorder = atlas_ui_flow(page)``.
 
     Выключённым отдаёт пустышку — тест не должен знать, включён сбор или нет, и не
-    должен обрастать ветками ради карты.
+    должен обрастать ветками ради карты. У включённого рекордера provenance — полный
+    nodeid именно этого варианта теста и одна метка текущего прогона.
     """
     записано: List[Any] = []
 
@@ -70,6 +72,8 @@ def atlas_ui_flow():
             window_ms=_state["window_ms"],
             ignore_url=_state["ignore_url"],
             ignore_control=_state["ignore_control"],
+            nodeid=request.node.nodeid,
+            run=_state["run"],
         ).attach(page)
         записано.append((recorder, page))
         return recorder
@@ -79,7 +83,8 @@ def atlas_ui_flow():
     for recorder, page in записано:
         try:
             _state.setdefault("links", []).extend(recorder.drain(page))
-        except Exception as exc:  # pragma: no cover - зависит от браузера
+        except Exception as exc:
+            _state["drain_failed"] = True
             print(f"[atlas] ui_flow: связи со страницы не сняты ({type(exc).__name__}: {exc})")
 
 
@@ -90,6 +95,12 @@ class _Пустышка:
         return []
 
 
+def pytest_runtest_call(item) -> None:  # noqa: ARG001
+    """Отличает исполненный прогон от `--collect-only` и пустого набора."""
+    if _state:
+        _state["executed"] = True
+
+
 def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ARG001
     if not _state:
         return
@@ -97,9 +108,19 @@ def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ARG001
     links = _state.get("links") or []
     if cfg is None:
         return
-    if not links:
-        print("[atlas] ui_flow: связей не зафиксировано")
+    if not _state.get("executed"):
+        print(f"[atlas] ui_flow: {ui_flow.KIND} не записан (тесты не исполнялись)")
         return
+    if _state.get("drain_failed"):
+        print(f"[atlas] ui_flow: {ui_flow.KIND} не записан (не все страницы дочитаны)")
+        return
+    if exitstatus not in (pytest.ExitCode.OK, pytest.ExitCode.TESTS_FAILED):
+        print(f"[atlas] ui_flow: {ui_flow.KIND} не записан (прогон завершился с ошибкой)")
+        return
+    if not links:
+        # Пустой документ — наблюдение текущего прогона, а не отказ от записи: иначе
+        # полный прогон без связей оставлял бы на диске прежнее состояние.
+        print("[atlas] ui_flow: связей не зафиксировано — записан текущий пустой артефакт")
     try:
         path = cfg.path_for(ui_flow.KIND)
         doc = ui_flow.build(links)

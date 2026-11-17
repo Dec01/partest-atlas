@@ -131,6 +131,56 @@ def test_different_endpoints_stay_apart():
     assert len(merge(links)) == 2
 
 
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "tests/test_screen.py::test_save[tenant::secondary]",
+        "tests/test_screen.py::test_save[a[b]",
+        "tests/test_screen.py::test_save[[]]",
+    ],
+)
+def test_base_nodeid_ignores_colons_inside_parameters(variant):
+    assert ui_flow.base_nodeid(variant) == "tests/test_screen.py::test_save"
+
+
+def test_provenance_survives_build_and_variants_do_not_merge():
+    """Одинаковый клик двух параметров — два наблюдения, а не счётчик одного."""
+    base = "tests/[legacy]/test_screen.py::test_save"
+    run = artifacts.run_label()
+    a = attribute([действие(0)], [запрос(10)], nodeid=base + "[a]", run=run)
+    a_again = attribute([действие(0)], [запрос(20)], nodeid=base + "[a]", run=run)
+    b = attribute([действие(0)], [запрос(10)], nodeid=base + "[b]", run=run)
+
+    rows = build(a + a_again + b)["links"]
+
+    assert {(row["nodeid"], row["variant"], row["count"]) for row in rows} == {
+        (base, base + "[a]", 2), (base, base + "[b]", 1),
+    }
+    assert all(row["run"] == run for row in rows)
+
+
+def test_identical_links_from_different_runs_do_not_merge():
+    nodeid = "tests/test_screen.py::test_save"
+    first = attribute(
+        [действие(0)], [запрос(10)], nodeid=nodeid,
+        run={"id": "run-a", "startedAt": "2026-11-17T10:00:00+03:00"},
+    )
+    second = attribute(
+        [действие(0)], [запрос(10)], nodeid=nodeid,
+        run={"id": "run-b", "startedAt": "2026-11-17T11:00:00+03:00"},
+    )
+
+    rows = build(first + second)["links"]
+
+    assert len(rows) == 2
+    assert {(row["run"]["id"], row["count"]) for row in rows} == {("run-a", 1), ("run-b", 1)}
+
+
+def test_legacy_links_without_provenance_keep_the_old_shape():
+    rows = build(attribute([действие(0)], [запрос(10)]))["links"]
+    assert rows and all(not {"nodeid", "variant", "run"}.intersection(row) for row in rows)
+
+
 # --- содержание артефакта --------------------------------------------------
 
 

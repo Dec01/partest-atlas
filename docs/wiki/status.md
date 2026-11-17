@@ -1,7 +1,7 @@
 ---
 title: Статус partest-atlas
 status: current
-verified: 2026-11-16
+verified: 2026-11-17
 sources: [partest_atlas/__init__.py, CHANGELOG.md]
 audience: agent
 allow_version_literals: true
@@ -16,12 +16,13 @@ allow_version_literals: true
 
 | | |
 |---|---|
-| Версия | 0.3.0, выпуск 2026-11-16 (схема артефактов 2, аддитивные изменения) |
+| Версия | 0.4.0, подготовленный кандидат 2026-11-17, ещё не выпущен (схема артефактов 2, аддитивные изменения) |
+| 0.4.0 | Подготовленный, но ещё не выпущенный кандидат 2026-11-17 — `CHANGELOG.md`: `partest-atlas collect specs`, provenance и корректные пустые артефакты `ui.flow`, глобально уникальные ID и отказ UNC в `specs`; схема артефактов 2. |
 | 0.3.0 | `CHANGELOG.md`, выпуск 0.3.0: `partest-atlas collect openapi\|db-schema\|container-logs` — [[components/collect]]; `contract.openapi` с `info` и `source`; `database.schemas: auto`, `database.key`, «нет ни одной таблицы» — ошибка; транзакция только на чтение механизмом (`adapters.postgres.read_only`); ленивое соединение `db_effects`; `--lang ru\|en` и язык по локали; пол partest 2.6.0. Набор формата: метка прогона `run` в `db.effects`/`bus.flow`, фазы `setup`/`call`/`teardown` (`db_effects.phases`), `write(..., collected_at=)`, `validate(kind=, scope=)` и `check` сверяют вид с именем и область с каталогом, `PAYLOAD_KEYS`, `inspect`/`discover_scopes`, `__all__` у `artifacts`, `config`, `collect.history`, записи `runs` непрозрачны, `containers.logs.logs` (прочитан/не прочитан, строки), нормализация `ui.flow.screen`, схема 1 — `invalid`. Раунд по находкам контролёров шага 1а: пол partest `>=2.8,<3` и загрузка спецификации у владельца (`resolve_swagger`, `redact_url`), несколько служб в `contract.openapi` (`services`, `service` у операции), правило имени области в `artifacts.Scope`, договор `atlas-config` (неизвестные ключи, UNC), `keep_runs` (20), маскировка всей полезной нагрузки при записи, таблица — пара (схема, имя), `connect_timeout`. Сводный раунд контролёров по кандидату: правило области через `fullmatch`, `check` без трассировок, печать записанного без Cc/Cf, потолки разбора и бюджет маскировки, UNC в любом написании, секретные ключи и неприкосновенные идентификаторы, `keep_runs` — прогон по `run.id` плюс последняя запись связи, `attempts` (дельта за все попытки повтора), строгое чтение у `check`/`show`, голый `collect`, `resolvedFrom`, `collectedAt` у служб; pass-through `lifecycle_plugins` без схемы со стороны агента. Схема — 2, аддитивно |
 | 0.2.2 | `partest_atlas.__version__` в 0.2.1 сообщал 0.2.0 (метаданные колеса — 0.2.1); номер теперь в одном месте — `partest_atlas/__init__.py`, `pyproject.toml` берёт его динамически (`CHANGELOG.md`, 0.2.2). |
-| PyPI | `partest-atlas` 0.2.2 и 0.2.1 — 2026-10-25; 0.2.0 — 2026-10-18; 0.1.0 — 2026-10-01; 0.3.0 подготовлена, но ещё не опубликована |
+| PyPI | `partest-atlas` 0.3.0 — 2026-11-16; 0.2.2 и 0.2.1 — 2026-10-25; 0.2.0 — 2026-10-18; 0.1.0 — 2026-10-01; 0.4.0 подготовлена, но ещё не опубликована |
 | 0.2.1 | срез покрытия под `coverage.json` partest 2.7.0 и сохранная история (`CHANGELOG.md`, 0.2.1, совместимо с 0.2.0): `avgRule`, `exception`, `scored`, объект `depth`, `avg: null` как «не измерено» (и для `0.0` при `endpoints: 0` из отчёта постарше), проверка типов недоверенного отчёта; непонятый `runs.json` не трогается: запись прогона пропускается с предупреждением `UnreadableHistory` (в 0.2.0 он молча затирался); `runs.json` — строгий JSON — [[components/history]]. |
-| Выпущено последним | 0.2.2, опубликована 2026-10-25 — см. строку 0.2.2; 0.3.0 ожидает публикации |
+| Выпущено последним | 0.3.0, опубликована 2026-11-16 — см. строку 0.3.0; 0.4.0 ожидает публикации |
 | 0.2.0 | несовместимо с 0.1.0 (см. `CHANGELOG.md`): режим `test` у `db_effects` (поштучный замер снаружи чужих обёрток, выдержка перед «до», режим после отбора, только сессия под xdist, нули, бесконечности и кривые числа в `atlas.yaml`, отказ первого снимка без INTERNALERROR); `bus_flow` под xdist только на контроллере; `wrap` и `.cmd`/`.bat` на Windows через системный `cmd.exe` с отказом от опасных аргументов (без печати значения), без текущего каталога и относительного `PATH`, только ведущий `--`; код 1 у `show` на несуществующем пути и не-артефакте; отказ `.docx` с DTD, с `document.xml` больше 16 МиБ и понятная ошибка без `document.xml`; `LICENSE` в дистрибутиве; классификатор `Operating System` |
 | Схема артефактов | `SCHEMA_VERSION = 2` |
 | Python | ≥ 3.10 |
@@ -39,10 +40,9 @@ allow_version_literals: true
   именем файла, области — с каталогом. Отдельно от `read`, который снисходителен нарочно:
   снисходительность чтения держит карту на ногах, строгость проверки ловит того, кто пишет
   артефакты мимо контракта. `inspect` — решение об артефакте машинным кодом
-  (`ok`/`missing`/`broken`/`newer`/`invalid`), `discover_scopes` — области на диске (не
-  выпущено).
-- `partest_atlas/cli.py` — команда `partest-atlas`: `show`, `check`, `wrap` и `collect`
-  (не выпущено). Коды и поведение — [[components/overview]], `collect` —
+  (`ok`/`missing`/`broken`/`newer`/`invalid`), `discover_scopes` — области на диске.
+- `partest_atlas/cli.py` — команда `partest-atlas`: `show`, `check`, `wrap` и `collect`.
+  Коды и поведение — [[components/overview]], `collect` —
   [[components/collect]]; язык вывода — `partest_atlas/lang.py`.
 - `wrap.py` — запуск чужого прогона, который не наш pytest; возвращается код самой
   команды, а не обёртки. На Windows скрипты `.cmd`/`.bat` идут через `cmd.exe` с отказом
@@ -69,7 +69,7 @@ allow_version_literals: true
 - **снимки в команде `wrap`**: `wrap.run` принимает `before`/`after`, но
   `partest-atlas wrap` их не передаёт и только запускает команду;
 - **`partest.path_match`** (сопоставление пути с шаблоном OpenAPI) не подключён. Остальная
-  связь с partest (не выпущено; пол `partest>=2.8,<3`): `artifacts.write` маскирует
+  связь с partest (пол `partest>=2.8,<3`): `artifacts.write` маскирует
   полезную нагрузку `partest.redact`, `collect` берёт `load_confpartest`,
   `partest.openapi.resolve_swagger`/`parse_swagger_entry`, `partest.redact.redact_url` и
   `partest.sideeffects.assert_read_only_sql`;
@@ -110,7 +110,7 @@ allow_version_literals: true
 Спорное с доводами — [[proposals]] (A–E от 2026-10-16; L–S от 2026-10-26 — по находкам
 контролёров шага 1а; L — код выхода `collect` — решено: 1).
 
-- Красные линии 2 и 6 в `AGENTS.md` (не выпущено): линия 2 держится транзакцией только на
+- Красные линии 2 и 6 в `AGENTS.md`: линия 2 держится транзакцией только на
   чтение у `db_schema` и `db_effects` и проверкой `assert_read_only_sql` у `db_schema`; у
   `db_effects` запросы — константы, проверенные тестом. Линия 6: `artifacts.write`
   прогоняет каждую строку полезной нагрузки через `partest.redact`, вывод плагинов и ошибки

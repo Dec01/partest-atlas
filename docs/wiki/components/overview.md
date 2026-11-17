@@ -1,7 +1,7 @@
 ---
 title: Карта пакета
 status: current
-verified: 2026-10-26
+verified: 2026-11-17
 sources: [partest_atlas/__init__.py, pyproject.toml, partest_atlas/cli.py, partest_atlas/wrap.py, partest_atlas/plugins/db_effects.py, partest_atlas/collect/db_effects.py, partest_atlas/collect/bus_flow.py, partest_atlas/collect/specs.py, partest_atlas/plugins/bus_flow.py, partest_atlas/plugins/ui_flow.py, partest_atlas/config.py, partest_atlas/collect/ui_flow.py]
 audience: agent
 ---
@@ -190,7 +190,13 @@ E). Цена — выдержка `settle_sec` на каждой границе:
 сессии. `bus_flow` под xdist так же: смещения снимает контроллер.
 `ui_flow` пишет файл с каждого воркера целиком, и под xdist в нём остаются связи
 последнего. Экран в `ui.flow` нормализуется, как путь и элемент: `#/orders/42?tab=1` →
-`/#/orders/{id}` — иначе каждый заказ был бы отдельным экраном.
+`/#/orders/{id}` — иначе каждый заказ был бы отдельным экраном. Новая связь несёт
+`nodeid` базового теста, полный `variant` и `run: {id, startedAt}`; `merge()` различает
+наблюдения по всем трём полям, а старые записи без них принимает. При нуле связей включённый
+плагин записывает текущий `links: []` с нулевой сводкой после прогона с исполненными тестами
+и полностью прочитанными страницами при коде pytest `OK` или `TESTS_FAILED`. `--collect-only`,
+прочие коды завершения (usage, interrupted, internal) и неудачный drain прежний файл сохраняют;
+без `ATLAS_UI_FLOW` файл не трогается.
 
 `settle_sec` и `per_test_limit` у `db_effects`, `settle_sec` у `bus_flow` — конечные
 неотрицательные числа; `0` — это ноль, кривое значение выключает плагин как ошибку
@@ -222,7 +228,10 @@ HTTP-запроса — значит, писал потребитель, а не
   около 0,6–0,75 ГБ на потолке;
 - DTD в документе — `UnsafeDocument` до разбора: Word его не пишет, а внешние сущности и
   «миллиард смешков» живут именно там;
-- битый XML — `xml.etree.ElementTree.ParseError`.
+- битый XML — `xml.etree.ElementTree.ParseError`;
+- UNC в `specs.files` — `ValueError` до `is_file` и `ZipFile`, без обращения к SMB;
+- повтор локального ID в другом файле с тем же prefix — следующий суффикс `~2`, `~3`…:
+  счётчик общий для всего списка и детерминирован его порядком.
 
 ## Драйверы — в extras
 

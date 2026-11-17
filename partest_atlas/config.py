@@ -56,6 +56,7 @@ KNOWN_KEYS: Dict[str, frozenset] = {
     "database": frozenset({"connect", "dsn_env", "schemas", "key", "label", "exclude",
                            "count_rows", "connect_timeout"}),
     "container_logs": frozenset({"source", "rules"}),
+    "specs": frozenset({"files", "heading_styles", "prefix", "min_chars", "synonyms"}),
     "db_effects": frozenset({"settle_sec", "per_test_limit", "include", "phases", "keep_runs"}),
     "bus_flow": frozenset({"reader", "configured", "include", "settle_sec", "keep_runs"}),
     "ui_flow": frozenset({"window_ms", "ignore_url", "ignore_control"}),
@@ -126,9 +127,9 @@ class Config:
     def section(self, name: str) -> Dict[str, Any]:
         return dict(self.raw.get(name) or {})
 
-    def path_for(self, kind: str) -> Path:
-        """Куда класть артефакт этого вида — с учётом раскладки по системе и контуру."""
-        return self.scope.path(self.artifacts_dir, kind)
+    def path_for(self, kind: str, *, scope: Optional[Scope] = None) -> Path:
+        """Куда класть артефакт этого вида — в явно переданной области или из окружения."""
+        return (scope or self.scope).path(self.artifacts_dir, kind)
 
 
 def non_negative(
